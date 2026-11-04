@@ -32,7 +32,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mhp1
-from hm08io import Obj, ASSETS, CE, body_group
+from hm08io import Obj, ASSETS, CE, body_group, macro_shape
 from fit import fit, SOURCES
 from features import facial_openings
 from geom import mirror_map
@@ -64,6 +64,23 @@ def blink_calibration(name, d_real, d_cart, VF, CF, rim_l, rim_r):
     rim = moved[0]
     tr, hr = stats(VF, d_real, rim); tc, hc = stats(CF, d_cart, rim)
     return float((hc * tr / hr) / max(tc, 1e-6))
+
+
+MUSCLE_SOURCES = {0: "Superhuman_F.glb", 1: "Superhuman_M.glb"}
+MUSCLE_SMOOTH = 4  # Laplacian passes over the muscle correction
+
+
+def mesh_laplacian(o, n):
+    """Row-normalised neighbour-average matrix over the hm08 face connectivity."""
+    import scipy.sparse as sp
+    rows, cols = [], []
+    for f in o.faces:
+        for i in range(len(f)):
+            rows += [f[i], f[(i + 1) % len(f)]]; cols += [f[(i + 1) % len(f)], f[i]]
+    A = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n)).tocsr()
+    A.data[:] = 1
+    deg = np.asarray(A.sum(1)).ravel(); deg[deg == 0] = 1
+    return sp.diags(1 / deg) @ A
 
 
 def main():
@@ -100,6 +117,23 @@ def main():
         offsets[f"cartoon/cartoon-{label}-head"] = d * head
         offsets[f"cartoon/cartoon-{label}"] = d * (1 - head - chest)
         offsets[f"cartoon/cartoon-{label}-chest"] = d * chest
+    # Muscle (and female bust) corrections: at muscle=1 (breastSize=1 for the female) the
+    # editor's realistic body plus the default cartoon offset should become the Superhuman
+    # reference. The fit to it starts from MakeHuman's max-muscle shape; the remainder is
+    # smoothed over the mesh (hm08 cannot follow the references' sharp muscle grooves
+    # without folding) and split like the offsets. The head gets none.
+    adj = mesh_laplacian(o, n)
+    for label, sex, V, C in (("female", 0, VF, CF), ("male", 1, VM, CM)):
+        V1 = macro_shape(o.v, sex, True)
+        S = fit(sex, source=MUSCLE_SOURCES[sex], muscular=True)[3]
+        S = transplant_hands(V1, repose(V1, S))
+        k = S - (V1 + (C - V))
+        for _ in range(MUSCLE_SMOOTH):
+            k = 0.5 * k + 0.5 * (adj @ k)
+        head = head_mask(V1); chest = chest_mask(V1) * (1 - head)
+        offsets[f"cartoon/cartoon-{label}-muscle"] = k * (1 - head - chest)
+        offsets[f"cartoon/cartoon-{label}-muscle-chest"] = k * chest
+        print(f"  {label} muscle correction: max {np.linalg.norm(k * (1 - head), axis=1).max():.3f} dm")
     for name, d in offsets.items():
         write_target(a.out / "targets" / (name + ".target"), np.arange(n), d, HEADER, False)
     print(f"shapes and offsets written ({time.time()-t0:.0f}s); expression corrections")
@@ -134,6 +168,10 @@ def main():
                        "male": "cartoon/cartoon-male", "female_chest": "cartoon/cartoon-female-chest",
                        "male_chest": "cartoon/cartoon-male-chest", "female_head": "cartoon/cartoon-female-head",
                        "male_head": "cartoon/cartoon-male-head",
+                       "female_muscle": "cartoon/cartoon-female-muscle",
+                       "male_muscle": "cartoon/cartoon-male-muscle",
+                       "female_muscle_chest": "cartoon/cartoon-female-muscle-chest",
+                       "male_muscle_chest": "cartoon/cartoon-male-muscle-chest",
                        "reference_height_dm": {"female": height(VF, body), "male": height(VM, body)}}
     packs = CE / "assets/native/cartoon_hm08"
     for stale in ("base.pack", "targets.pack"):

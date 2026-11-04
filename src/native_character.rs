@@ -298,6 +298,8 @@ fn cartoon_amount(recipe: &AraRecipe) -> f32 {
 /// gender and scale with body height relative to the adult default, so children and
 /// short characters get proportionate offsets.  Children keep the full cartoon head,
 /// a lighter body offset and no adult chest; both blend in between ages 12 and 18.
+/// Muscle above 0.5 (and, for the female chest, breast size too) blends towards the
+/// Superhuman references.
 fn add_cartoon_offsets(
     lib: &NativeLibrary,
     recipe: &AraRecipe,
@@ -328,7 +330,13 @@ fn add_cartoon_offsets(
     let (female, male) = (amount * (1. - gender) * size, amount * gender * size);
     // Children keep the full cartoon head but a lighter, straighter body.
     let body = 0.35 + 0.65 * adult;
-    let weights = BTreeMap::from([
+    // Superhuman corrections: muscle 0.5 -> 1 fades in the max-muscle cartoon body; the
+    // female chest part needs full muscle and full bust together (one reference has both).
+    let above_half = |key: &str| {
+        ((recipe.params[key].as_f64().unwrap_or(0.5) as f32 - 0.5) * 2.).clamp(0., 1.)
+    };
+    let (muscle, bust) = (above_half("muscle"), above_half("breastSize"));
+    let mut weights = BTreeMap::from([
         (name("female_head"), female),
         (name("male_head"), male),
         (name("female"), female * body),
@@ -336,6 +344,14 @@ fn add_cartoon_offsets(
         (name("female_chest"), female * adult),
         (name("male_chest"), male * adult),
     ]);
+    if !info["female_muscle"].is_null() {
+        weights.extend([
+            (name("female_muscle"), female * body * muscle),
+            (name("male_muscle"), male * body * muscle),
+            (name("female_muscle_chest"), female * adult * muscle * bust),
+            (name("male_muscle_chest"), male * adult * muscle),
+        ]);
+    }
     crate::native_morph::add_targets(pack, coords, &weights)
 }
 

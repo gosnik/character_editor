@@ -51,8 +51,20 @@ and UVs unchanged). `targets/cartoon/` holds the offsets as `.target` files
 (`cartoon-<sex>-head`, `cartoon-<sex>`, `cartoon-<sex>-chest`) plus the expression
 corrections. `report.json` records source hashes, landmarks and fit metrics.
 
+**Muscle and bust.** At **Muscle** 1, and for the female also **Breast size** 1, the
+cartoon body becomes the Superhuman references (`references/Superhuman_{F,M}.glb`).
+The build fits hm08 to each reference, starting from MakeHuman's max-muscle shape (max cup
+for the female). It stores the remainder over "max-muscle MakeHuman plus the default cartoon
+offset" as `cartoon-<sex>-muscle` and `cartoon-<sex>-muscle-chest` (no head part),
+smoothed lightly over the mesh. In the editor, muscle above 0.5 fades the body part in.
+The female chest part needs both muscle and breast size, since one reference holds both;
+the male chest follows muscle. These fits also pull the surface toward the reference from
+the reference's side (bidirectional ICP), so it swells into the large muscles. hm08's
+resolution softens the finest definition, such as the abs and the separations between
+muscles.
+
 **Rebuild** with `python3 tools/cartoon_hm08/build.py`; it needs Python with NumPy and
-SciPy, takes about 20 seconds and is deterministic. The fit uses hand-picked face,
+SciPy, takes about 30 seconds and is deterministic. The fit uses hand-picked face,
 ear, finger and toe landmarks (`tools/cartoon_hm08/landmarks.json`), Meshy rig joints
 and rule-based body extremes. It then runs a thin-plate warp and Laplacian-regularised
 non-rigid ICP onto the Meshy surface. The eye and lip margins are mapped to almond

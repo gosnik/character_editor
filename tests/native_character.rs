@@ -324,6 +324,34 @@ fn custom_target_axis_and_recipe_persistence() {
 }
 
 #[test]
+fn cartoon_muscle_follows_the_superhuman_references() {
+    let lib = library();
+    let info = &lib.cartoon_offsets().unwrap().meta["cartoon"];
+    for key in ["female_muscle", "male_muscle", "female_muscle_chest", "male_muscle_chest"] {
+        assert!(info[key].is_string(), "{key} correction missing from cartoon.pack");
+    }
+    let body = |gender: f64, muscle: f64, cartoon: bool| {
+        let mut r = AraRecipe::default();
+        r.params["gender"] = json!(gender);
+        r.params["muscle"] = json!(muscle);
+        r.params["breastSize"] = json!(1.0);
+        r.cartoon.enabled = cartoon;
+        let c = NativeCharacter::build(&lib, &r).unwrap();
+        c.parts.iter().find(|p| p.name == "Body").unwrap().positions.clone()
+    };
+    let moved = |a: &[[f32; 3]], b: &[[f32; 3]]| {
+        a.iter().zip(b).map(|(x, y)| (0..3).map(|k| (x[k] - y[k]).powi(2)).sum::<f32>().sqrt()).sum::<f32>() / a.len() as f32
+    };
+    for gender in [0.0, 1.0] {
+        // Muscle moves the cartoon body further than the realistic one: the Superhuman
+        // correction adds to MakeHuman's own muscle targets.
+        let real = moved(&body(gender, 0.5, false), &body(gender, 1.0, false));
+        let cartoon = moved(&body(gender, 0.5, true), &body(gender, 1.0, true));
+        assert!(cartoon > real * 1.3, "gender {gender}: cartoon muscle {cartoon} vs realistic {real}");
+    }
+}
+
+#[test]
 fn cartoon_lashes_are_a_lid_line_that_blinks() {
     let lib = library();
     let mut recipe = AraRecipe::default();

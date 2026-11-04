@@ -84,10 +84,14 @@ def apply_targets(coords, weights):
     return out
 
 
-def macro_shape(base, gender):
-    """MakeHuman default macros (age 25, average muscle/weight, equal ethnic mix)."""
+def macro_shape(base, gender, muscular=False):
+    """MakeHuman default macros (age 25, average muscle/weight, equal ethnic mix), or
+    with `muscular` the editor's muscle=1 shape (breastSize=1 for the female)."""
     g = "female" if gender == 0 else "male"
-    w = {f"macrodetails/universal-{g}-young-averagemuscle-averageweight": 1.0}
+    m = "maxmuscle" if muscular else "averagemuscle"
+    w = {f"macrodetails/universal-{g}-young-{m}-averageweight": 1.0}
+    if muscular and gender == 0:
+        w["breast/female-young-maxmuscle-averageweight-maxcup-averagefirmness"] = 1.0
     for r in ("african", "asian", "caucasian"):
         w[f"macrodetails/{r}-{g}-young"] = 1 / 3
     return apply_targets(base, w)

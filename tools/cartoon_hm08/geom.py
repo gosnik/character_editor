@@ -68,8 +68,25 @@ def load_picks():
     return json.loads((HERE / "landmarks.json").read_text())
 
 
+PICK_FALLBACK = None  # (P, T) of the surface the picks were authored on, if different
+
+
 def pick_points(spec, P, T):
-    return {k: raycast(P, T, *v) for k, v in spec.items() if not k.startswith("_")}
+    """Raycast each landmark pick. Picks authored on the Meshy blank may miss a bulkier
+    reference (the Superhuman hands); those are cast on the blank and snapped to the
+    nearest vertex of P."""
+    out = {}
+    for k, v in spec.items():
+        if k.startswith("_"):
+            continue
+        try:
+            out[k] = raycast(P, T, *v)
+        except ValueError:
+            if PICK_FALLBACK is None:
+                raise
+            q = raycast(*PICK_FALLBACK, *v)
+            out[k] = P[np.argmin(((P - q) ** 2).sum(1))]
+    return out
 
 
 def auto_points(P, eye_y, neck_y, hip_y, ankle_y):

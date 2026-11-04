@@ -35,6 +35,7 @@ FINGERS = ["thumb", "index", "middle", "ring", "pinky"]
 # Per sex (female, male): the male blank's eyes are already narrower.
 EYE_OPEN = (0.85, 1.0)
 EYE_DROP = 0.18
+REVERSE = 1.0  # weight of the reference->hm08 ICP term for the Superhuman fits
 EYE_CLEAR = 0.012  # dm between the eyeball and the lid margin
 SOCKET_REACH = 3.0  # in opening half-sizes: how far round the eye the socket fill reaches
 SOCKET_ITERS = 80
@@ -135,10 +136,58 @@ def interior_mask(o, V, body):
     return ex
 
 
-def nicp(V0b, faces_b, src_P, src_N, lm_local, lm_dst, exclude, schedule, log):
+# Body parts for correspondence: (part, start joint, end joint) on the Meshy rig and the
+# hm08 joint helpers. A hanging hand right beside a bulky thigh (the Superhuman female)
+# otherwise pulls thigh vertices onto the hand.
+PART_SEGMENTS = [
+    (0, "Hips", "neck", "joint-pelvis", "joint-neck"), (0, "neck", "Head", "joint-neck", "joint-head"),
+    (1, "LeftArm", "LeftForeArm", "joint-l-shoulder", "joint-l-elbow"),
+    (1, "LeftForeArm", "LeftHand", "joint-l-elbow", "joint-l-hand"),
+    (3, "LeftUpLeg", "LeftLeg", "joint-l-upper-leg", "joint-l-knee"),
+    (3, "LeftLeg", "LeftFoot", "joint-l-knee", "joint-l-ankle"),
+]
+PART_AMBIGUOUS = 1.35  # second-nearest part within this factor: a junction, matches anything
+
+
+def part_labels(P, segments):
+    """Nearest-segment part label per point (hands extend past the wrist, feet forward of
+    the ankle), plus a flag for junction points near two parts."""
+    best = np.full((len(P), 5), np.inf)
+    for part, a, b in segments:
+        ab = b - a; t = np.clip(((P - a) @ ab) / (ab @ ab), 0, 1)
+        d = np.linalg.norm(P - (a + t[:, None] * ab), axis=1)
+        best[:, part] = np.minimum(best[:, part], d)
+    order = np.sort(best, 1)
+    return best.argmin(1), order[:, 1] < PART_AMBIGUOUS * order[:, 0]
+
+
+def segments_from(points):
+    """PART_SEGMENTS resolved with `points(name)`, mirrored for the right side and extended
+    to the hand and toes."""
+    out = []
+    for part, ma, mb, ha, hb in PART_SEGMENTS:
+        a, b = points(ma, ha), points(mb, hb)
+        out.append((part, a, b))
+        if part == 1:
+            out.append((part, b, b + (b - a) * 0.6))
+        if part == 3 and ma == "LeftLeg":
+            out.append((part, b, b + np.array([0, -0.5, 1.3])))
+    for part, a, b in list(out):
+        if part:
+            out.append((part + 1, a * [-1, 1, 1], b * [-1, 1, 1]))
+    return out
+
+
+def nicp(V0b, faces_b, src_P, src_N, lm_local, lm_dst, exclude, schedule, log, parts=None, reverse=0.0):
+    """Non-rigid ICP. With `reverse` > 0 reference points also pull their nearest vertex
+    (bidirectional), so the surface swells into bulges the nearest-point term alone
+    never reaches (the Superhuman muscles)."""
     n = len(V0b); L = uniform_laplacian(n, faces_b); LtL = (L.T @ L).tocsc()
     T = tri_list(faces_b); tree = cKDTree(src_P)
     X = V0b.copy(); delta = L @ V0b
+    rev_ids = np.random.default_rng(3).choice(len(src_P), min(len(src_P), 60000), replace=False)
+    if parts is not None:
+        (lab_b, amb_b), (lab_s, amb_s) = parts
     for alpha, iters, thr, lw in schedule:
         for _ in range(iters):
             N = vertex_normals(X, T)
@@ -146,11 +195,27 @@ def nicp(V0b, faces_b, src_P, src_N, lm_local, lm_dst, exclude, schedule, log):
             # best of 8 nearest by distance + normal disagreement penalty
             cos = np.einsum("nkc,nc->nk", src_N[j], N)
             score = d + 0.5 * thr * (1 - cos)
+            if parts is not None:
+                ok = (lab_s[j] == lab_b[:, None]) | amb_b[:, None] | amb_s[j]
+                score = np.where(ok, score, np.inf)
+                cos = np.where(ok, cos, -1.0)
             b = np.argmin(score, 1); jj = j[np.arange(n), b]; dd = d[np.arange(n), b]; cc = cos[np.arange(n), b]
             w = ((dd < thr) & (cc > 0.4) & ~exclude).astype(float)
             # point-to-plane flavoured target: move along the source normal mostly
             q = src_P[jj]; nq = src_N[jj]
             tgt = X + nq * ((q - X) * nq).sum(1, keepdims=True) * 0.7 + (q - X) * 0.3
+            if reverse > 0:
+                ds, iv = cKDTree(X).query(src_P[rev_ids])
+                ok = (ds < thr) & ((src_N[rev_ids] * N[iv]).sum(1) > 0.4) & ~exclude[iv]
+                if parts is not None:
+                    ok &= (lab_s[rev_ids] == lab_b[iv]) | amb_s[rev_ids] | amb_b[iv]
+                acc = np.zeros((n, 3)); cnt = np.zeros(n)
+                np.add.at(acc, iv[ok], src_P[rev_ids][ok]); np.add.at(cnt, iv[ok], 1)
+                got = cnt > 0
+                wr = np.where(got, reverse, 0.0)
+                tr = np.where(got[:, None], acc / np.maximum(cnt, 1)[:, None], X)
+                tgt = (w[:, None] * tgt + wr[:, None] * tr) / np.maximum(w + wr, 1e-9)[:, None]
+                w = w + wr
             W = sp.diags(w)
             Lw = np.zeros(n); Lw[lm_local] = lw
             A = (alpha * LtL + W + sp.diags(Lw)).tocsc()
@@ -247,14 +312,19 @@ def fit_sphere(P):
     return c, float(np.sqrt(x[3] + c @ c))
 
 
-def fit(sex, log=print):
+def fit(sex, log=print, source=None, muscular=False):
+    """Fit hm08 to a cartoon surface. `source` (default the Meshy blank) is a GLB in
+    references/ in the blank's frame and pose; `muscular` starts from MakeHuman's
+    max-muscle shape (and max cup for the female), for the Superhuman references."""
     o = Obj(); o._mirror = mirror_map(o.v); mir = o._mirror
     ref_f = macro_shape(o.v, 0)
-    V = macro_shape(o.v, sex)
+    V = macro_shape(o.v, sex, muscular)
     picks = load_picks()
     hm_ids = hm08_landmark_ids(o, ref_f, picks)
     feat = facial_openings(o, ref_f)
-    src_P, src_F = glb_mesh(ASSETS / SOURCES[sex])
+    src_P, src_F = glb_mesh(ASSETS / (source or SOURCES[sex]))
+    import geom
+    geom.PICK_FALLBACK = glb_mesh(ASSETS / SOURCES[sex]) if source else None
     src_N = vertex_normals(src_P, src_F)
     joints = glb_joints(CE / "assets/native/cartoon_meshy/rigging" / RIGS[sex], src_P)
     (ls, ld, lid, names), (js, jd) = landmark_pairs(o, V, sex, src_P, src_F, joints, hm_ids)
@@ -275,7 +345,12 @@ def fit(sex, log=print):
     # soft constraints: landmarks (weight 1) and rim targets (weight 1)
     cid = np.concatenate([local[lid], local[rid]]); cpt = np.vstack([ld, rpt])
     sched = [(200, 3, 1.0, 5.0), (60, 3, 0.6, 5.0), (20, 3, 0.4, 5.0), (8, 3, 0.3, 4.0), (3, 3, 0.25, 3.0), (1.2, 4, 0.2, 2.0), (0.5, 3, 0.15, 1.5), (0.25, 3, 0.1, 1.0)]
-    Xb = nicp(W0[body], faces_b, src_P, src_N, cid, cpt, exclude, sched, log)
+    # Part labels: the hm08 side follows the TPS-warped shape the ICP starts from.
+    side = lambda mj, hg: group_centroid(o, W0, hg)
+    src_side = lambda mj, hg: joints[mj]
+    parts = (part_labels(W0[body], segments_from(side)), part_labels(src_P, segments_from(src_side)))
+    Xb = nicp(W0[body], faces_b, src_P, src_N, cid, cpt, exclude, sched, log, parts,
+              reverse=REVERSE if source else 0.0)
     # tidy the stretched lid/lip margins and any locally folded faces
     tree = cKDTree(src_P)
     ex_set = set(np.where(exclude)[0]) - set(local[rid])
