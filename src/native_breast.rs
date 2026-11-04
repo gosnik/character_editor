@@ -158,6 +158,13 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 ///
 /// The exact neutral shape is a no-op, including for a male character. This
 /// matters because the normal target stack is authoritative at its defaults.
+/// Areola dome radius for projection, as a share of the breast bone length.
+const AREOLA_RADIUS: f32 = 0.18;
+/// Skin-weight band of the breast's rim, which sets its chest-wall level.
+const RIM_WEIGHT: (f32, f32) = (0.03, 0.15);
+/// Skin weight above which a vertex scales fully with projection.
+const MEMBER_WEIGHT: f32 = 0.25;
+
 pub fn reshape(
     lib: &NativeLibrary,
     coords: &mut [[f32; 3]],
@@ -186,13 +193,36 @@ pub fn reshape(
     }
     let breasts = source_breasts(lib, coords)?;
     let source = coords.to_vec();
+    let mut reshaped = vec![false; coords.len()];
+    // Chest-wall level of each breast along its axis: projection scales how far each
+    // point stands out from it, so the mound keeps its rounded shape.
+    // The wall is the mean level of the breast's rim, where its skin weight fades out.
+    let (mut wall, mut rim) = ([0f32; 2], [0f32; 2]);
+    for (vertex, point) in source.iter().enumerate() {
+        let (start, end) = (offsets[vertex] as usize, offsets[vertex + 1] as usize);
+        for (b, breast) in breasts.iter().enumerate() {
+            let weight: f32 = (start..end.min(bones.len()))
+                .filter(|&entry| bones[entry] == breast.index)
+                .map(|entry| values[entry].max(0.0))
+                .sum();
+            let axis = (breast.tail - breast.head).normalize_or_zero();
+            let along = (Vec3::from(*point) - breast.head).dot(axis);
+            if weight > RIM_WEIGHT.0 && weight < RIM_WEIGHT.1 && along > 0.0 {
+                wall[b] += along;
+                rim[b] += 1.0;
+            }
+        }
+    }
+    for b in 0..2 {
+        wall[b] = if rim[b] > 0.0 { wall[b] / rim[b] } else { 0.0 };
+    }
     for (vertex, point) in source.iter().enumerate() {
         let start = offsets[vertex] as usize;
         let end = offsets[vertex + 1] as usize;
         if start > end || end > bones.len() {
             return Err("base breast skin offset is out of bounds".into());
         }
-        for breast in &breasts {
+        for (b, breast) in breasts.iter().enumerate() {
             let weight: f32 = (start..end)
                 .filter(|&entry| bones[entry] == breast.index)
                 .map(|entry| values[entry].max(0.0))
@@ -213,33 +243,54 @@ pub fn reshape(
             // The source weight establishes anatomical membership; this second
             // smooth envelope prevents a hard seam at its outer edge.
             let local = 1.0 - smoothstep(length * 1.05, length * 1.9, from_center.length());
+            // Projection scales each point's stand-out from the chest wall, and carries
+            // the nipple and areola fully (a cosine dome around the tip on top of the
+            // skin weight), so the tip moves with its neighbours, not as a spike or cone.
+            let tip = Vec3::from(*point).distance(breast.tail) / (length * AREOLA_RADIUS);
+            let areola = if tip < 1.0 {
+                0.5 * (1.0 + (std::f32::consts::PI * tip).cos())
+            } else {
+                0.0
+            };
             let influence = weight * local * female;
-            if influence <= 1e-6 {
+            // Membership saturates quickly so the whole mound scales, not just the
+            // heavily weighted tip; the standout itself falls to zero at the rim.
+            let member = (weight / MEMBER_WEIGHT).min(1.0) * local;
+            let projected = member.max(areola) * female;
+            if projected <= 1e-6 {
                 continue;
             }
-            let volume = radial * ((settings.volume - 1.0) * 0.72)
-                + forward * ((settings.volume - 1.0) * length * 0.32);
-            let projection = forward * ((settings.projection - 1.0) * length * 0.78);
+            reshaped[vertex] = true;
+            let volume = (radial * ((settings.volume - 1.0) * 0.72)
+                + forward * ((settings.volume - 1.0) * length * 0.32))
+                * influence;
+            let standout = ((Vec3::from(*point) - breast.head).dot(forward) - wall[b]).max(0.0);
+            let projection = forward * ((settings.projection - 1.0) * standout) * projected;
             let lift = Vec3::Y * (settings.lift * length * 0.72);
             let separation = Vec3::X * (breast.side * settings.separation * length * 0.70);
             let changed =
-                Vec3::from(*point) + (volume + projection + lift + separation) * influence;
+                Vec3::from(*point) + volume + projection + (lift + separation) * influence;
             coords[vertex] = changed.to_array();
         }
     }
-    // These nipple helper vertices can be unweighted. Move them explicitly so
-    // the rig's breast-tail anchors follow an extreme projection too, without
-    // touching the shared sternum head or unrelated chest vertices.
-    for breast in &breasts {
+    // Breast-tail anchor vertices that carry no breast weight (helpers) are moved
+    // explicitly so the rig's anchors follow an extreme projection too, without
+    // touching the shared sternum head or unrelated chest vertices. Surface
+    // vertices were already reshaped smoothly above; moving them again by the
+    // full delta pulled the nipple out as a spike.
+    for (b, breast) in breasts.iter().enumerate() {
         let axis = breast.tail - breast.head;
         let length = axis.length();
         let forward = axis / length;
+        let standout = (length - wall[b]).max(0.0);
         let delta = forward
-            * ((settings.volume - 1.0) * length * 0.32
-                + (settings.projection - 1.0) * length * 0.78)
+            * ((settings.volume - 1.0) * length * 0.32 + (settings.projection - 1.0) * standout)
             + Vec3::Y * (settings.lift * length * 0.72)
             + Vec3::X * (breast.side * settings.separation * length * 0.70);
         for vertex in joint_vertices(&lib.base.meta, &breast.tail_name)? {
+            if reshaped.get(vertex).copied().unwrap_or(false) {
+                continue;
+            }
             *coords
                 .get_mut(vertex)
                 .ok_or_else(|| format!("breast tail vertex {vertex} outside coordinates"))? =

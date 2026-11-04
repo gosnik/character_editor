@@ -57,7 +57,9 @@ The build fits hm08 to each reference, starting from MakeHuman's max-muscle shap
 for the female). It stores the remainder over "max-muscle MakeHuman plus the default cartoon
 offset" as `cartoon-<sex>-muscle` and `cartoon-<sex>-muscle-chest` (no head part),
 smoothed lightly over the mesh. In the editor, muscle above 0.5 fades the body part in.
-The female chest part needs both muscle and breast size, since one reference holds both;
+The female chest part needs both muscle and breast size, since one reference holds both.
+It covers everything MakeHuman's max-cup target moves, with a wide smooth falloff, so a
+muscular body never reshapes a smaller bust;
 the male chest follows muscle. These fits also pull the surface toward the reference from
 the reference's side (bidirectional ICP), so it swells into the large muscles. hm08's
 resolution softens the finest definition, such as the abs and the separations between
@@ -153,8 +155,10 @@ The full editor starts with a clothed, textured and animated character. It has:
   macros. Heritage weights normalize when evaluated. Age uses the reference's
   12–90 year range. The source's clothing/underwear rules for younger characters
   are retained.
-- Additional breast volume, projection, lift and separation controls; independent
-  breast bones with adjustable secondary-motion strength, stiffness and damping.
+- Additional breast volume, projection, lift and separation controls (under Breast
+  firmness). Projection scales how far the mound stands out from the chest wall and
+  carries the nipple and areola with it as a rounded dome. Independent breast bones
+  have adjustable secondary-motion strength, stiffness and damping.
   Fitted clothing follows the edited silhouette. Motion is included in animated
   GLB exports and can be disabled for a host game to drive the bones itself.
 - 20 photo-based skins, automatic skin selection, tint colors, 30 complete

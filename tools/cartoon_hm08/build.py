@@ -70,6 +70,28 @@ MUSCLE_SOURCES = {0: "Superhuman_F.glb", 1: "Superhuman_M.glb"}
 MUSCLE_SMOOTH = 4  # Laplacian passes over the muscle correction
 
 
+BUST_TARGET = "breast/female-young-maxmuscle-averageweight-maxcup-averagefirmness"
+BUST_FALLOFF = 0.8  # dm: Gaussian falloff of the bust mask around the cup target's support
+BUST_ARM_X = 2.0  # dm: the mask fades out before the arms
+
+
+def bust_mask(o, V, adj):
+    """Soft mask over everything the max-cup breast target moves, widened and feathered."""
+    from hm08io import read_target, TARGETS
+    i, d = read_target(TARGETS / (BUST_TARGET + ".target"))
+    m = np.zeros(len(V)); m[i] = np.linalg.norm(d, axis=1)
+    core = V[np.clip(m / (0.15 * m.max()), 0, 1) > 0.5]
+    # Wide, smooth falloff from the bust (no crease where the body part takes over),
+    # kept off the arms.
+    from scipy.spatial import cKDTree
+    d = cKDTree(core).query(V)[0]
+    m = np.exp(-(d / BUST_FALLOFF) ** 2)
+    m *= np.clip((BUST_ARM_X - np.abs(V[:, 0])) / 0.4, 0, 1)
+    for _ in range(4):
+        m = 0.5 * m + 0.5 * (adj @ m)
+    return m[:, None]
+
+
 def mesh_laplacian(o, n):
     """Row-normalised neighbour-average matrix over the hm08 face connectivity."""
     import scipy.sparse as sp
@@ -130,7 +152,14 @@ def main():
         k = S - (V1 + (C - V))
         for _ in range(MUSCLE_SMOOTH):
             k = 0.5 * k + 0.5 * (adj @ k)
-        head = head_mask(V1); chest = chest_mask(V1) * (1 - head)
+        head = head_mask(V1); chest = chest_mask(V1)
+        if sex == 0:
+            # The female reference has both full muscle and full bust, and its fit starts
+            # from MakeHuman's max cup. Everything that cup target moves (with a margin)
+            # goes to the chest part, faded in by breast size, so at a smaller bust the
+            # body part never reshapes the breasts.
+            chest = np.maximum(chest, bust_mask(o, V1, adj))
+        chest = chest * (1 - head)
         offsets[f"cartoon/cartoon-{label}-muscle"] = k * (1 - head - chest)
         offsets[f"cartoon/cartoon-{label}-muscle-chest"] = k * chest
         print(f"  {label} muscle correction: max {np.linalg.norm(k * (1 - head), axis=1).max():.3f} dm")

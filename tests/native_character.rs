@@ -324,6 +324,30 @@ fn custom_target_axis_and_recipe_persistence() {
 }
 
 #[test]
+fn breast_projection_moves_the_nipple_with_its_areola() {
+    let lib = library();
+    let base: Vec<[f32; 3]> = lib.base.arrays["positions"].f32().unwrap().chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    let faces = lib.base.arrays["faceVerts"].u32().unwrap();
+    let tip = lib.base.meta["joints"]["breast.L____tail"][0].as_u64().unwrap() as u32;
+    let mut ring = std::collections::BTreeSet::new();
+    for q in faces.chunks_exact(4).filter(|q| q.contains(&tip)) {
+        ring.extend(q.iter().copied().filter(|&v| v != tip));
+    }
+    for projection in [1.25, 2.0] {
+        let mut coords = base.clone();
+        let settings = human_editor::native_breast::BreastSettings { projection, ..Default::default() };
+        human_editor::native_breast::reshape(&lib, &mut coords, 0.0, &settings).unwrap();
+        let moved = |v: u32| {
+            let (a, b) = (base[v as usize], coords[v as usize]);
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        };
+        let neighbours = ring.iter().map(|&v| moved(v)).fold(0., f32::max);
+        // The tip rides its areola: no lone spike ahead of the surrounding skin.
+        assert!(moved(tip) > 0. && moved(tip) <= neighbours * 1.15, "projection {projection}: tip {} vs ring {neighbours}", moved(tip));
+    }
+}
+
+#[test]
 fn cartoon_muscle_follows_the_superhuman_references() {
     let lib = library();
     let info = &lib.cartoon_offsets().unwrap().meta["cartoon"];
