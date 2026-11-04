@@ -34,10 +34,9 @@ cargo run --bin human-editor -- --headless export --preset 'Athletic woman' \
   --clip walk --output exports/woman.glb
 ```
 
-`human-export` remains compatible with its original flags (`--params`, `--out`,
-`--preset`, `--seed`, `--clip`, `--all-clips`, `--static`, `--detail`, `--assets`
-and `--list`), and also accepts the new subcommands. `--list` now prints the full
-catalog as JSON. Invalid/unknown arguments are rejected instead of ignored.
+`human-export` accepts its own flags (`--params`, `--out`, `--preset`, `--seed`,
+`--clip`, `--all-clips`, `--static`, `--detail`, `--assets` and `--list`) as well as
+the subcommands. `--list` prints the full catalog as JSON. Invalid/unknown arguments are rejected instead of ignored.
 
 The default asset path points to this source checkout's `assets/native` directory.
 When distributing binaries, ship that directory too, then use `--assets DIR` or
@@ -114,11 +113,10 @@ human-cli wardrobe apply scout-field-kit.wardrobe.json --preset 'Athletic man' \
   --output scout.json
 ```
 
-### Cartoon characters and wardrobe compatibility
+### Cartoon characters
 
-The editor's **Cartoon mode** adds cartoon proportions on top of the MakeHuman body;
-`cartoon.strength` is the amount (0 realistic, 1 full cartoon). The same saved
-settings work headlessly:
+`cartoon.enabled` turns on Cartoon mode and `cartoon.strength` sets the amount
+(0 realistic, 1 full cartoon). Wardrobes, rigs and clips work unchanged:
 
 ```sh
 human-cli create --preset 'Athletic woman' --set cartoon.enabled=true \
@@ -127,8 +125,7 @@ human-cli create --preset 'Athletic woman' --set cartoon.enabled=true \
 human-cli export --input citizen.json --output citizen.glb --clip idle,walk
 ```
 
-Every MakeHuman control, garment, expression and rig works in cartoon mode. See the
-README's *Cartoon mode* section.
+See the README's *Cartoon mode* section for what it changes.
 
 Meshy service animation IDs are `meshy-female:Idle`,
 `meshy-female:Casual_Walk`, `meshy-female:Run_02` and their `meshy-male:`
@@ -356,7 +353,8 @@ manifests are limited to 64 MiB; target decompression has its own bounded parser
 
 ## Universal Animation Libraries
 
-Import the supplied Quaternius GLB libraries once into the selected native asset directory:
+Download the Quaternius Universal Animation Library packs (CC0 1.0; not included in
+this repository) and import them once into the selected native asset directory:
 
 ```sh
 human-cli animation-import --id ual1 --source '../Universal Animation Library'
@@ -371,4 +369,4 @@ namespaced clip IDs, so duplicate animation names across libraries do not collid
 The imported catalog is also available in the GUI animation selector. Restart an
 open editor after importing a library. Recipes keep their existing export selection;
 use `--all-clips` or the GUI's export-all button to select every installed clip.
-The library's CC0 license files remain alongside the source assets.
+Keep the packs' CC0 license files alongside the source assets.
