@@ -156,8 +156,9 @@ The full editor starts with a clothed, textured and animated character. It has:
   12–90 year range. The source's clothing/underwear rules for younger characters
   are retained.
 - Additional breast volume, projection, lift and separation controls (under Breast
-  firmness). Projection scales how far the mound stands out from the chest wall, and
-  shapes the areola and nipple (`nipple_relief`). At 1 the areola stands 1 mm above the
+  firmness). Above 1, projection scales how far the mound stands out from the chest wall.
+  Below 1 it blends the mound toward a flat chest: a smooth surface spanning its rim,
+  reached at the minimum (0.2). It also shapes the areola and nipple (`nipple_relief`). At 1 the areola stands 1 mm above the
   breast and the nipple 3 mm above it; at 2, 5 mm and 12 mm. Below 1 the areola rounds
   off and the nipple inverts, to 2 mm at the minimum. Realistic MakeHuman bodies model
   their own nipples, so they get only the change from 1. Independent breast bones

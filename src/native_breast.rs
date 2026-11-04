@@ -158,6 +158,10 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 ///
 /// The exact neutral shape is a no-op, including for a male character. This
 /// matters because the normal target stack is authoritative at its defaults.
+/// Jacobi passes of the flat-chest membrane used below projection 1.
+const FLAT_ITERATIONS: usize = 1200;
+/// Smoothing passes over the flattening blend weight.
+const FLAT_FEATHER: usize = 6;
 /// Areola dome radius for projection, as a share of the breast bone length.
 const AREOLA_RADIUS: f32 = 0.18;
 /// Skin-weight band of the breast's rim, which sets its chest-wall level.
@@ -207,6 +211,8 @@ pub fn reshape(
     let breasts = source_breasts(lib, coords)?;
     let source = coords.to_vec();
     let mut reshaped = vec![false; coords.len()];
+    // How much each vertex belongs to a breast mound, for flattening below projection 1.
+    let mut mound = vec![0f32; coords.len()];
     // Chest-wall level of each breast along its axis: projection scales how far each
     // point stands out from it, so the mound keeps its rounded shape.
     // The wall is the mean level of the breast's rim, where its skin weight fades out.
@@ -277,14 +283,26 @@ pub fn reshape(
             let volume = (radial * ((settings.volume - 1.0) * 0.72)
                 + forward * ((settings.volume - 1.0) * length * 0.32))
                 * influence;
+            // Above 1 the mound's stand-out from its rim level is scaled; below 1 the part
+            // in front of the rim (not the armpit side) blends towards a flat chest.
             let standout = ((Vec3::from(*point) - breast.head).dot(forward) - wall[b]).max(0.0);
-            let projection = forward * ((settings.projection - 1.0) * standout * projected);
+            if standout > 0.0 {
+                mound[vertex] = mound[vertex].max(member * female);
+            }
+            let projection = if settings.projection > 1.0 {
+                forward * ((settings.projection - 1.0) * standout * projected)
+            } else {
+                Vec3::ZERO
+            };
             let lift = Vec3::Y * (settings.lift * length * 0.72);
             let separation = Vec3::X * (breast.side * settings.separation * length * 0.70);
             let changed =
                 Vec3::from(*point) + volume + projection + (lift + separation) * influence;
             coords[vertex] = changed.to_array();
         }
+    }
+    if settings.projection < 1.0 {
+        flatten_mounds(lib, coords, &mound, (1.0 - settings.projection) / 0.8)?;
     }
     // Breast-tail anchor vertices that carry no breast weight (helpers) are moved
     // explicitly so the rig's anchors follow an extreme projection too, without
@@ -297,7 +315,8 @@ pub fn reshape(
         let forward = axis / length;
         let standout = (length - wall[b]).max(0.0);
         let delta = forward
-            * ((settings.volume - 1.0) * length * 0.32 + (settings.projection - 1.0) * standout)
+            * ((settings.volume - 1.0) * length * 0.32
+                + (settings.projection - 1.0).max(0.0) * standout)
             + Vec3::Y * (settings.lift * length * 0.72)
             + Vec3::X * (breast.side * settings.separation * length * 0.70);
         for vertex in joint_vertices(&lib.base.meta, &breast.tail_name)? {
@@ -519,6 +538,67 @@ pub fn bake_secondary(
     let mut matrices = rig.pose(clip, end);
     motion.apply(rig, &mut matrices, Vec3::ZERO, 0.0, settings, gender);
     matrices
+}
+
+/// Below projection 1, blends each breast mound towards a flat chest: a smooth membrane
+/// spanning the mound's rim (a harmonic fill with the surrounding chest held fixed), so
+/// at the minimum the chest is flat and continuous with its surroundings instead of a
+/// recessed plane.
+fn flatten_mounds(
+    lib: &NativeLibrary,
+    coords: &mut [[f32; 3]],
+    mound: &[f32],
+    amount: f32,
+) -> Result<(), String> {
+    let amount = amount.clamp(0.0, 1.0);
+    if amount == 0.0 {
+        return Ok(());
+    }
+    let faces = array(&lib.base, "faceVerts")?.u32()?;
+    let mut neighbours: Vec<Vec<usize>> = vec![Vec::new(); coords.len()];
+    for quad in faces.chunks_exact(4) {
+        for k in 0..4 {
+            let (a, b) = (quad[k] as usize, quad[(k + 1) % 4] as usize);
+            if a < coords.len() && b < coords.len() && (mound[a] > 0.0 || mound[b] > 0.0) {
+                neighbours[a].push(b);
+                neighbours[b].push(a);
+            }
+        }
+    }
+    let free: Vec<usize> = (0..coords.len())
+        .filter(|&v| mound[v] > 0.0 && !neighbours[v].is_empty())
+        .collect();
+    // Feather the blend weight so it never steps between neighbours.
+    let mut weight = mound.to_vec();
+    for _ in 0..FLAT_FEATHER {
+        let next: Vec<f32> = free
+            .iter()
+            .map(|&v| {
+                let n = &neighbours[v];
+                0.5 * weight[v] + 0.5 * n.iter().map(|&u| weight[u]).sum::<f32>() / n.len() as f32
+            })
+            .collect();
+        for (&v, w) in free.iter().zip(next) {
+            weight[v] = w;
+        }
+    }
+    let mut flat: Vec<Vec3> = coords.iter().map(|p| Vec3::from(*p)).collect();
+    for _ in 0..FLAT_ITERATIONS {
+        let next: Vec<Vec3> = free
+            .iter()
+            .map(|&v| {
+                neighbours[v].iter().map(|&n| flat[n]).sum::<Vec3>() / neighbours[v].len() as f32
+            })
+            .collect();
+        for (&v, p) in free.iter().zip(next) {
+            flat[v] = p;
+        }
+    }
+    for &v in &free {
+        let t = amount * weight[v];
+        coords[v] = Vec3::from(coords[v]).lerp(flat[v], t).to_array();
+    }
+    Ok(())
 }
 
 /// Raises the areola and nipple as two rounded mounds along each breast's axis
