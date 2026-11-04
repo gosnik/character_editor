@@ -47,9 +47,9 @@ control keeps working.
 ### What it changes
 
 - **Body:** female and male cartoon shapes blend with the gender slider and scale with
-  height. Children keep the cartoon head with a lighter body. At **Muscle** 1 (and
-  **Breast size** 1 for women) the body reaches the muscular references in
-  `references/`; lower values blend toward the regular cartoon shape.
+  height. Children keep the cartoon head with a lighter body. At **Muscle** 1 the body
+  reaches the muscular references in `references/`; lower values blend toward the
+  regular cartoon shape.
 - **Face:** flat skin, cartoon eyes with a large iris and highlight, eyes that sit almost
   flush with the face, solid brows, a single lash line on each upper lid, and painted
   beards. Blinks, expressions and speech shapes are resized to match.
@@ -94,11 +94,6 @@ The full editor starts with a clothed, textured and animated character. It has:
   macros. Heritage weights normalize when evaluated. Age uses the reference's
   12–90 year range. The source's clothing/underwear rules for younger characters
   are retained.
-- Additional breast volume, projection, lift and separation controls (under Breast
-  firmness), including the areola and nipple, and independent breast bones with
-  adjustable secondary-motion strength, stiffness and damping.
-  Fitted clothing follows the edited silhouette. Motion is included in animated
-  GLB exports and can be disabled for a host game to drive the bones itself.
 - 20 photo-based skins, automatic skin selection, tint colors, 30 complete
   presets, and deterministic seeded randomization.
 - 119 fitted garment/appearance/prop templates with separate surfaces, native
@@ -173,7 +168,7 @@ reported for asset review. The viewport and native exports use the same fit.
 ## Native command line
 
 The complete [headless CLI reference](docs/CLI.md) covers discovery, all parameter
-and detail controls, breast settings, custom targets, MHM conversion, validation,
+and detail controls, custom targets, MHM conversion, validation,
 inspection, Basic projects, and manifest-based batch exports. Use `human-cli`,
 or `human-editor --headless` with an editor build. CLI-only builds exclude the
 window event loop and X11 integration:

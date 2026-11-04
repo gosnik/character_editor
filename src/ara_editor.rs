@@ -221,6 +221,7 @@ pub(crate) fn native_ui(
             if state.category=="Details"{
                 ui.add(egui::TextEdit::singleline(&mut state.search).hint_text("Search detail controls"));
                 if ui.button("Reset detail morphs").clicked(){recipe.params["modifiers"]=json!({});}
+                breast_shape_ui(ui,&mut recipe.breasts);
                 for group in schema["sliders"].as_array().unwrap(){let sliders=group["sliders"].as_array().unwrap();let query=state.search.to_lowercase();
                     let filtered:Vec<_>=sliders.iter().filter(|s|query.is_empty()||s["label"].as_str().unwrap_or("").to_lowercase().contains(&query)||s["id"].as_str().unwrap_or("").contains(&query)).collect();
                     if filtered.is_empty(){continue;}
@@ -365,10 +366,7 @@ pub(crate) fn native_ui(
                 let outfit_before=recipe.params["outfit"].clone();
                 let hair_before=recipe.params["hair"].clone();
                 let beard_before=recipe.params["facialHair"].clone();
-                for field in schema["fields"].as_array().unwrap(){if field["category"].as_str()!=Some(&state.category){continue;}draw_field(ui,&mut recipe.params,field);
-                    // The detailed breast controls sit with the breast macros, under firmness.
-                    if field["id"]=="breastFirmness"{breast_shape_ui(ui,&mut recipe.breasts);}
-                }
+                for field in schema["fields"].as_array().unwrap(){if field["category"].as_str()!=Some(&state.category){continue;}draw_field(ui,&mut recipe.params,field);}
                 if state.category=="Hair"&&recipe.params["hair"]!=hair_before{recipe.remove_custom_garment_slot(&GarmentSlot::Hair);}
                 if state.category=="Hair"&&recipe.params["facialHair"]!=beard_before{recipe.remove_custom_garment_slot(&GarmentSlot::Beard);}
                 if recipe.params["outfit"]!=outfit_before{
