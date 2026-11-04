@@ -162,6 +162,11 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 const AREOLA_RADIUS: f32 = 0.18;
 /// Skin-weight band of the breast's rim, which sets its chest-wall level.
 const RIM_WEIGHT: (f32, f32) = (0.03, 0.15);
+/// Extra forward puff of the areola dome per unit of projection, as a share of the
+/// breast bone length.
+const NIPPLE_PUFF: f32 = 0.1;
+/// Share of the areola radius over which the puff stays at full height (the nipple).
+const NIPPLE_TOP: f32 = 0.3;
 /// Skin weight above which a vertex scales fully with projection.
 const MEMBER_WEIGHT: f32 = 0.25;
 
@@ -265,7 +270,13 @@ pub fn reshape(
                 + forward * ((settings.volume - 1.0) * length * 0.32))
                 * influence;
             let standout = ((Vec3::from(*point) - breast.head).dot(forward) - wall[b]).max(0.0);
-            let projection = forward * ((settings.projection - 1.0) * standout) * projected;
+            // On top of the scaled mound, projection also puffs the areola and nipple
+            // out as a rounded dome (more pronounced above 1, flatter below).
+            // Flat over the nipple, rounded across the areola.
+            let dome = 1.0 - smoothstep(NIPPLE_TOP, 1.0, tip);
+            let puff = (settings.projection - 1.0) * length * NIPPLE_PUFF * dome * female;
+            let projection =
+                forward * ((settings.projection - 1.0) * standout * projected + puff);
             let lift = Vec3::Y * (settings.lift * length * 0.72);
             let separation = Vec3::X * (breast.side * settings.separation * length * 0.70);
             let changed =
@@ -284,7 +295,8 @@ pub fn reshape(
         let forward = axis / length;
         let standout = (length - wall[b]).max(0.0);
         let delta = forward
-            * ((settings.volume - 1.0) * length * 0.32 + (settings.projection - 1.0) * standout)
+            * ((settings.volume - 1.0) * length * 0.32
+                + (settings.projection - 1.0) * (standout + length * NIPPLE_PUFF))
             + Vec3::Y * (settings.lift * length * 0.72)
             + Vec3::X * (breast.side * settings.separation * length * 0.70);
         for vertex in joint_vertices(&lib.base.meta, &breast.tail_name)? {

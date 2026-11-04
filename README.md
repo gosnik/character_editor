@@ -156,8 +156,8 @@ The full editor starts with a clothed, textured and animated character. It has:
   12–90 year range. The source's clothing/underwear rules for younger characters
   are retained.
 - Additional breast volume, projection, lift and separation controls (under Breast
-  firmness). Projection scales how far the mound stands out from the chest wall and
-  carries the nipple and areola with it as a rounded dome. Independent breast bones
+  firmness). Projection scales how far the mound stands out from the chest wall, and
+  also pushes the nipple and areola out (flattens them below 1) as a rounded dome. Independent breast bones
   have adjustable secondary-motion strength, stiffness and damping.
   Fitted clothing follows the edited silhouette. Motion is included in animated
   GLB exports and can be disabled for a host game to drive the bones itself.
