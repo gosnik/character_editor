@@ -348,6 +348,30 @@ fn breast_projection_moves_the_nipple_with_its_areola() {
 }
 
 #[test]
+fn nipple_relief_matches_the_requested_heights() {
+    let lib = library();
+    let base: Vec<[f32; 3]> = lib.base.arrays["positions"].f32().unwrap().chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    let tip = lib.base.meta["joints"]["breast.L____tail"][0].as_u64().unwrap() as usize;
+    let lifted = |projection: f32, cartoon: f32| {
+        let mut c = base.clone();
+        human_editor::native_breast::nipple_relief(&lib, &mut c, 0.0, projection, cartoon).unwrap();
+        // decimetres -> millimetres
+        // signed along the outward breast axis, decimetres -> millimetres
+        let head = lib.base.meta["joints"]["breast.L____head"][0].as_u64().unwrap() as usize;
+        let axis: Vec<f32> = (0..3).map(|k| base[tip][k] - base[head][k]).collect();
+        let len = axis.iter().map(|a| a * a).sum::<f32>().sqrt();
+        (0..3).map(|k| (c[tip][k] - base[tip][k]) * axis[k] / len).sum::<f32>() * 100.
+    };
+    // Cartoon: 1 mm areola + 3 mm nipple at projection 1, 5 + 12 mm at 2; at the
+    // minimum the areola keeps 1 mm (rounded) and the nipple is 2 mm inverted.
+    assert!((lifted(1.0, 1.0) - 4.0).abs() < 0.05, "{}", lifted(1.0, 1.0));
+    assert!((lifted(2.0, 1.0) - 17.0).abs() < 0.05, "{}", lifted(2.0, 1.0));
+    assert!((lifted(0.2, 1.0) - (1.0 - 2.0)).abs() < 0.05, "{}", lifted(0.2, 1.0));
+    // Realistic MakeHuman keeps its own nipples at 1.
+    assert_eq!(lifted(1.0, 0.0), 0.0);
+}
+
+#[test]
 fn cartoon_muscle_follows_the_superhuman_references() {
     let lib = library();
     let info = &lib.cartoon_offsets().unwrap().meta["cartoon"];

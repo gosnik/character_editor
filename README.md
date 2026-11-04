@@ -157,7 +157,10 @@ The full editor starts with a clothed, textured and animated character. It has:
   are retained.
 - Additional breast volume, projection, lift and separation controls (under Breast
   firmness). Projection scales how far the mound stands out from the chest wall, and
-  also pushes the nipple and areola out (flattens them below 1) as a rounded dome. Independent breast bones
+  shapes the areola and nipple (`nipple_relief`). At 1 the areola stands 1 mm above the
+  breast and the nipple 3 mm above it; at 2, 5 mm and 12 mm. Below 1 the areola rounds
+  off and the nipple inverts, to 2 mm at the minimum. Realistic MakeHuman bodies model
+  their own nipples, so they get only the change from 1. Independent breast bones
   have adjustable secondary-motion strength, stiffness and damping.
   Fitted clothing follows the edited silhouette. Motion is included in animated
   GLB exports and can be disabled for a host game to drive the bones itself.

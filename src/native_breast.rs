@@ -162,11 +162,19 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 const AREOLA_RADIUS: f32 = 0.18;
 /// Skin-weight band of the breast's rim, which sets its chest-wall level.
 const RIM_WEIGHT: (f32, f32) = (0.03, 0.15);
-/// Extra forward puff of the areola dome per unit of projection, as a share of the
-/// breast bone length.
-const NIPPLE_PUFF: f32 = 0.1;
-/// Share of the areola radius over which the puff stays at full height (the nipple).
-const NIPPLE_TOP: f32 = 0.3;
+/// Areola and nipple relief, in decimetres (hm08 units; 0.01 = 1 mm): heights at
+/// projection 1 (the cartoon base, which has no relief of its own) and their gain per
+/// unit of projection. At projection 2 the areola stands 5 mm above the breast and
+/// the nipple 12 mm above the areola.
+const AREOLA_HEIGHT: (f32, f32) = (0.01, 0.04);
+const NIPPLE_HEIGHT: (f32, f32) = (0.03, 0.09);
+/// Below projection 1 the nipple sinks by this much per unit (dm): through flat to
+/// 2 mm inverted at the slider minimum (0.2). The areola keeps its height there and
+/// only rounds off (its flat top shrinks to nothing).
+const NIPPLE_SINK: f32 = 0.0625;
+/// Flat-top and outer radii (dm) of the areola and nipple mounds around the tip.
+const AREOLA_RADII: (f32, f32) = (0.12, 0.20);
+const NIPPLE_RADII: (f32, f32) = (0.045, 0.09);
 /// Skin weight above which a vertex scales fully with projection.
 const MEMBER_WEIGHT: f32 = 0.25;
 
@@ -270,13 +278,7 @@ pub fn reshape(
                 + forward * ((settings.volume - 1.0) * length * 0.32))
                 * influence;
             let standout = ((Vec3::from(*point) - breast.head).dot(forward) - wall[b]).max(0.0);
-            // On top of the scaled mound, projection also puffs the areola and nipple
-            // out as a rounded dome (more pronounced above 1, flatter below).
-            // Flat over the nipple, rounded across the areola.
-            let dome = 1.0 - smoothstep(NIPPLE_TOP, 1.0, tip);
-            let puff = (settings.projection - 1.0) * length * NIPPLE_PUFF * dome * female;
-            let projection =
-                forward * ((settings.projection - 1.0) * standout * projected + puff);
+            let projection = forward * ((settings.projection - 1.0) * standout * projected);
             let lift = Vec3::Y * (settings.lift * length * 0.72);
             let separation = Vec3::X * (breast.side * settings.separation * length * 0.70);
             let changed =
@@ -295,8 +297,7 @@ pub fn reshape(
         let forward = axis / length;
         let standout = (length - wall[b]).max(0.0);
         let delta = forward
-            * ((settings.volume - 1.0) * length * 0.32
-                + (settings.projection - 1.0) * (standout + length * NIPPLE_PUFF))
+            * ((settings.volume - 1.0) * length * 0.32 + (settings.projection - 1.0) * standout)
             + Vec3::Y * (settings.lift * length * 0.72)
             + Vec3::X * (breast.side * settings.separation * length * 0.70);
         for vertex in joint_vertices(&lib.base.meta, &breast.tail_name)? {
@@ -518,6 +519,46 @@ pub fn bake_secondary(
     let mut matrices = rig.pose(clip, end);
     motion.apply(rig, &mut matrices, Vec3::ZERO, 0.0, settings, gender);
     matrices
+}
+
+/// Raises the areola and nipple as two rounded mounds along each breast's axis
+/// (below projection 1 the areola rounds off and the nipple inverts).
+/// `base` (0..1) adds the relief a smooth surface lacks at projection 1 (cartoon mode:
+/// the cartoon fit has no nipples); realistic MakeHuman already models them, so it
+/// gets only the change with projection. Heights are `AREOLA_HEIGHT`/`NIPPLE_HEIGHT`.
+pub fn nipple_relief(
+    lib: &NativeLibrary,
+    coords: &mut [[f32; 3]],
+    gender: f32,
+    projection: f32,
+    base: f32,
+) -> Result<(), String> {
+    let female = if gender.is_finite() { (1.0 - gender).clamp(0.0, 1.0) } else { 0.0 };
+    if female == 0.0 {
+        return Ok(());
+    }
+    let above = (projection - 1.0).max(0.0);
+    let below = ((1.0 - projection) / 0.8).clamp(0.0, 1.0);
+    let areola = AREOLA_HEIGHT.0 * base + AREOLA_HEIGHT.1 * above;
+    let nipple = NIPPLE_HEIGHT.0 * base + NIPPLE_HEIGHT.1 * above - NIPPLE_SINK * 0.8 * below;
+    if areola == 0.0 && nipple == 0.0 {
+        return Ok(());
+    }
+    let areola_top = AREOLA_RADII.0 * (1.0 - below);
+    let breasts = source_breasts(lib, coords)?;
+    for breast in &breasts {
+        let forward = (breast.tail - breast.head).normalize_or_zero();
+        for point in coords.iter_mut() {
+            let d = Vec3::from(*point).distance(breast.tail);
+            if d >= AREOLA_RADII.1 {
+                continue;
+            }
+            let lift = areola * (1.0 - smoothstep(areola_top, AREOLA_RADII.1, d))
+                + nipple * (1.0 - smoothstep(NIPPLE_RADII.0, NIPPLE_RADII.1, d));
+            *point = (Vec3::from(*point) + forward * lift * female).to_array();
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

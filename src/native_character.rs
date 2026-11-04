@@ -384,6 +384,13 @@ impl NativeCharacter {
             p["gender"].as_f64().unwrap_or(1.) as f32,
             &recipe.breasts,
         )?;
+        crate::native_breast::nipple_relief(
+            lib,
+            &mut coords,
+            p["gender"].as_f64().unwrap_or(1.) as f32,
+            recipe.breasts.projection,
+            cartoon_amount(recipe),
+        )?;
         if s(p, "shoes") == "heels" {
             crate::native_anatomy::arch_feet(lib, &mut coords)?;
         }
