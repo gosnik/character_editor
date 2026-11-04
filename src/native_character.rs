@@ -260,7 +260,10 @@ fn facial_shapes(
         let mut moved = apply_weighted_targets(lib, &weights)?;
         if cartoon > 0. {
             // Expression units resized to the cartoon eyes and mouth.
-            let scaled = weights.iter().map(|(k, w)| (k.clone(), w * cartoon)).collect();
+            let scaled = weights
+                .iter()
+                .map(|(k, w)| (k.clone(), w * cartoon))
+                .collect();
             crate::native_morph::add_targets(lib.cartoon_offsets()?, &mut moved, &scaled)?;
         }
         for (i, v) in moved.iter_mut().enumerate() {
@@ -311,7 +314,10 @@ fn add_cartoon_offsets(
     }
     let pack = lib.cartoon_offsets()?;
     let info = &pack.meta["cartoon"];
-    let gender = recipe.params["gender"].as_f64().unwrap_or(0.5).clamp(0., 1.) as f32;
+    let gender = recipe.params["gender"]
+        .as_f64()
+        .unwrap_or(0.5)
+        .clamp(0., 1.) as f32;
     let reference = |sex: &str| info["reference_height_dm"][sex].as_f64().unwrap_or(16.) as f32;
     let reference = reference("female") * (1. - gender) + reference("male") * gender;
     let faces = array(&lib.base, "faceVerts")?.u32()?;
@@ -332,9 +338,8 @@ fn add_cartoon_offsets(
     let body = 0.35 + 0.65 * adult;
     // Superhuman corrections: muscle 0.5 -> 1 fades in the max-muscle cartoon body; the
     // female chest part needs full muscle and full bust together (one reference has both).
-    let above_half = |key: &str| {
-        ((recipe.params[key].as_f64().unwrap_or(0.5) as f32 - 0.5) * 2.).clamp(0., 1.)
-    };
+    let above_half =
+        |key: &str| ((recipe.params[key].as_f64().unwrap_or(0.5) as f32 - 0.5) * 2.).clamp(0., 1.);
     let (muscle, bust) = (above_half("muscle"), above_half("breastSize"));
     let mut weights = BTreeMap::from([
         (name("female_head"), female),
@@ -395,8 +400,7 @@ impl NativeCharacter {
             crate::native_anatomy::arch_feet(lib, &mut coords)?;
         }
         let (mut face_names, mut face_deltas) = facial_shapes(lib, p, cartoon_amount(recipe))?;
-        if let Some(teeth) = find(&lib.catalog, "teeth", s(p, "teeth"))
-        {
+        if let Some(teeth) = find(&lib.catalog, "teeth", s(p, "teeth")) {
             if let Some(index) = face_names.iter().position(|n| n == "mouthUpperUp") {
                 let proxy = lib.proxy(teeth["file"].as_str().ok_or("teeth has no proxy")?)?;
                 crate::native_anatomy::seal_lips(lib, &mut coords, &face_deltas[index], &proxy)?;
@@ -455,9 +459,16 @@ impl NativeCharacter {
             if let Some(item) = find(&lib.catalog, category, s(p, key)) {
                 // Cartoon mode replaces strand-card lashes with the solid upper-lid
                 // lash line built by tools/cartoon_hm08/lashes.py.
-                let sex = if p["gender"].as_f64().unwrap_or(1.) >= 0.5 { "male" } else { "female" };
+                let sex = if p["gender"].as_f64().unwrap_or(1.) >= 0.5 {
+                    "male"
+                } else {
+                    "female"
+                };
                 let ribbon = format!("proxies/cartoon_eyelashes_{sex}.pack");
-                if label == "Eyelashes" && cartoon_amount(recipe) >= 0.5 && lib.root.join(&ribbon).is_file() {
+                if label == "Eyelashes"
+                    && cartoon_amount(recipe) >= 0.5
+                    && lib.root.join(&ribbon).is_file()
+                {
                     let mut swapped = item.clone();
                     swapped["file"] = json!(ribbon);
                     swapped["material"] = lib.proxy(&ribbon)?.meta["material"].clone();
@@ -470,8 +481,7 @@ impl NativeCharacter {
         if p["tongue"] != false && s(p, "teeth") != "none" {
             add_proxy(&lib.catalog["tongue"], "Tongue", "#ffffff", false)?;
         }
-        if let Some(eye) = find(&lib.catalog, "eyes", s(p, "eyes"))
-        {
+        if let Some(eye) = find(&lib.catalog, "eyes", s(p, "eyes")) {
             let mut item = eye.clone();
             item["file"] = lib.catalog["eyeMesh"].clone();
             add_proxy(&item, "Eyes", "#ffffff", false)?;
@@ -493,7 +503,9 @@ impl NativeCharacter {
                 .collect();
             eyes.material["roughness"] = json!(0.12);
         }
-        let has_custom_beard = recipe.custom_garments.iter()
+        let has_custom_beard = recipe
+            .custom_garments
+            .iter()
             .any(|garment| garment.slot == crate::wardrobe_assets::GarmentSlot::Beard);
         // Resolve the conflict before native wardrobe construction so both card
         // beards and painted cartoon stubble are suppressed, including recipes
@@ -506,8 +518,13 @@ impl NativeCharacter {
         // Cartoon beards: short and full card beards read as patchy clumps at toy
         // scale, so they become the painted stubble region in the beard colour, like
         // the Meshy cast's painted beards. Mustaches and goatees keep their cards.
-        if !has_custom_beard && cartoon_amount(recipe) >= 0.5 && matches!(s(p, "facialHair"), "short_beard" | "full_beard") {
-            wardrobe.parts.retain(|part| !part.name.starts_with("facialHair:"));
+        if !has_custom_beard
+            && cartoon_amount(recipe) >= 0.5
+            && matches!(s(p, "facialHair"), "short_beard" | "full_beard")
+        {
+            wardrobe
+                .parts
+                .retain(|part| !part.name.starts_with("facialHair:"));
             let ink = p["beardColor"].as_str().unwrap_or("#241a13");
             if let Some(part) = crate::native_wardrobe::tattoo_part(lib, &coords, "stubble", ink)? {
                 wardrobe.parts.push(part);
@@ -662,16 +679,16 @@ impl NativeCharacter {
             .any(|part| is_hair(&part.name) || is_custom_hair_part(part))
         {
             let full_body = polygon_part(
-                    "Hair collider",
-                    &coords,
-                    &sizes,
-                    face_verts,
-                    array(&lib.base, "faceUVs")?.u32()?,
-                    array(&lib.base, "uvs")?.f32()?,
-                    None,
-                    json!({}),
-                    &[],
-                    &[],
+                "Hair collider",
+                &coords,
+                &sizes,
+                face_verts,
+                array(&lib.base, "faceUVs")?.u32()?,
+                array(&lib.base, "uvs")?.f32()?,
+                None,
+                json!({}),
+                &[],
+                &[],
             )?;
             let clothing: Vec<NativePart> = parts
                 .iter()

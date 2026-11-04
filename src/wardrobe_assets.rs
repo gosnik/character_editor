@@ -5,8 +5,8 @@
 //! material JSON (and native-library-relative texture paths) explicitly.
 use crate::{
     native_assets::{Array, NativeLibrary},
-    native_fit::BodyDeformation,
     native_character::NativePart,
+    native_fit::BodyDeformation,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -371,16 +371,25 @@ impl CustomGarment {
 
     /// Fits through body anchors and transports the authored normal/tangent
     /// offset through the supplied current body deformation field.
-    pub fn fit_adaptive(&self, coords_dm: &[[f32; 3]], field: &BodyDeformation) -> Result<NativePart, String> {
+    pub fn fit_adaptive(
+        &self,
+        coords_dm: &[[f32; 3]],
+        field: &BodyDeformation,
+    ) -> Result<NativePart, String> {
         self.validate()?;
         let mut part = self.fit(coords_dm)?;
         for index in 0..part.positions.len() {
-            let offset = bevy::prelude::Vec3::from(self.positions_dm[index]) - bevy::prelude::Vec3::from(self.reference_points_dm[index]);
+            let offset = bevy::prelude::Vec3::from(self.positions_dm[index])
+                - bevy::prelude::Vec3::from(self.reference_points_dm[index]);
             let adaptive = field.transform_offset(self.refs[index], self.weights[index], offset)?;
             let mut anchor = [0.; 3];
             for k in 0..3 {
-                let point = coords_dm.get(self.refs[index][k] as usize).ok_or("garment reference is outside this body")?;
-                for axis in 0..3 { anchor[axis] += point[axis] * self.weights[index][k]; }
+                let point = coords_dm
+                    .get(self.refs[index][k] as usize)
+                    .ok_or("garment reference is outside this body")?;
+                for axis in 0..3 {
+                    anchor[axis] += point[axis] * self.weights[index][k];
+                }
             }
             part.positions[index] = (bevy::prelude::Vec3::from(anchor) + adaptive).to_array();
         }
@@ -504,7 +513,11 @@ pub fn import_obj(
         .iter()
         .enumerate()
         .filter_map(|(i, &r)| {
-            let bindable = if matches!(slot, GarmentSlot::Beard) { r == 0 } else { r != 255 };
+            let bindable = if matches!(slot, GarmentSlot::Beard) {
+                r == 0
+            } else {
+                r != 255
+            };
             bindable.then_some(i)
         })
         .collect();

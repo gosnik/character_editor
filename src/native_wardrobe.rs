@@ -401,11 +401,19 @@ fn separate_layers(
             normal += *normals.get(r[k] as usize)? * w[k];
         }
         let normal = normal.try_normalize()?;
-        Some((r[0] as usize, normal, (Vec3::from(part.positions[i]) - base).dot(normal)))
+        Some((
+            r[0] as usize,
+            normal,
+            (Vec3::from(part.positions[i]) - base).dot(normal),
+        ))
     };
     for outer in 2..=3u8 {
         let mut inner = vec![f32::NEG_INFINITY; coords.len()];
-        for (part, _) in parts.iter().zip(layers).filter(|(_, l)| (1..outer).contains(*l)) {
+        for (part, _) in parts
+            .iter()
+            .zip(layers)
+            .filter(|(_, l)| (1..outer).contains(*l))
+        {
             for i in 0..part.positions.len() {
                 if let Some((v, _, h)) = height(part, i) {
                     inner[v] = inner[v].max(h);
@@ -423,7 +431,8 @@ fn separate_layers(
                 if let Some((v, n, h)) = height(part, i) {
                     let need = inner[v] + LAYER_GAP;
                     if need.is_finite() && h < need {
-                        part.positions[i] = (Vec3::from(part.positions[i]) + n * (need - h)).to_array();
+                        part.positions[i] =
+                            (Vec3::from(part.positions[i]) + n * (need - h)).to_array();
                     }
                 }
             }

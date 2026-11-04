@@ -34,8 +34,8 @@ fn wardrobe_keys(include_hair: bool, include_beard: bool) -> BTreeSet<String> {
         .iter()
         .filter(|field| {
             matches!(field["category"].as_str(), Some("Clothing" | "Props"))
-                || (field["category"] == "Hair" &&
-                    if matches!(field["id"].as_str(), Some("facialHair" | "beardColor")) {
+                || (field["category"] == "Hair"
+                    && if matches!(field["id"].as_str(), Some("facialHair" | "beardColor")) {
                         include_beard
                     } else {
                         include_hair
@@ -51,7 +51,12 @@ impl WardrobeProfile {
         // Preserve the original API's complete Hair-category capture.
         Self::capture_with_beard(recipe, name, include_hair, include_hair)
     }
-    pub fn capture_with_beard(recipe: &AraRecipe, name: &str, include_hair: bool, include_beard: bool) -> Result<Self, String> {
+    pub fn capture_with_beard(
+        recipe: &AraRecipe,
+        name: &str,
+        include_hair: bool,
+        include_beard: bool,
+    ) -> Result<Self, String> {
         let keys = wardrobe_keys(include_hair, include_beard);
         let profile = Self {
             version: 1,
@@ -109,14 +114,22 @@ impl WardrobeProfile {
         for (key, value) in self.params.as_object().unwrap() {
             changed.params[key] = value.clone();
         }
-        for (parameter, slot) in [("hair", crate::wardrobe_assets::GarmentSlot::Hair),
-                                  ("facialHair", crate::wardrobe_assets::GarmentSlot::Beard)] {
-            if self.params.get(parameter).is_some() && !self.custom_garments.iter().any(|g| g.slot == slot) {
+        for (parameter, slot) in [
+            ("hair", crate::wardrobe_assets::GarmentSlot::Hair),
+            ("facialHair", crate::wardrobe_assets::GarmentSlot::Beard),
+        ] {
+            if self.params.get(parameter).is_some()
+                && !self.custom_garments.iter().any(|g| g.slot == slot)
+            {
                 changed.remove_custom_garment_slot(&slot);
             }
         }
         for garment in &self.custom_garments {
-            if matches!(garment.slot, crate::wardrobe_assets::GarmentSlot::Hair | crate::wardrobe_assets::GarmentSlot::Beard) {
+            if matches!(
+                garment.slot,
+                crate::wardrobe_assets::GarmentSlot::Hair
+                    | crate::wardrobe_assets::GarmentSlot::Beard
+            ) {
                 changed.select_custom_garment(garment)?;
                 continue;
             }

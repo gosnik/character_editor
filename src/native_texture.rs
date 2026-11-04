@@ -213,7 +213,11 @@ pub fn soften_diffuse(image: &mut image::RgbaImage, strength: f32) {
 /// `native_cartoon::soften_material`) and scaled by its `cartoonDetail`.
 pub fn cartoon_texture(image: &mut image::RgbaImage, material: &Value) {
     let strength = material["cartoonDetail"].as_f64().unwrap_or(0.) as f32;
-    let strength = if strength.is_finite() { strength.clamp(0., 1.) } else { 0. };
+    let strength = if strength.is_finite() {
+        strength.clamp(0., 1.)
+    } else {
+        0.
+    };
     if strength == 0. {
         return;
     }
@@ -242,8 +246,18 @@ fn broad_blur(image: &image::RgbaImage, sigma: f32) -> image::RgbaImage {
     if step == 1 {
         return blur(image, sigma);
     }
-    let small = resize(image, (w / step).max(1), (h / step).max(1), FilterType::Triangle);
-    resize(&blur(&small, sigma / step as f32), w, h, FilterType::Triangle)
+    let small = resize(
+        image,
+        (w / step).max(1),
+        (h / step).max(1),
+        FilterType::Triangle,
+    );
+    resize(
+        &blur(&small, sigma / step as f32),
+        w,
+        h,
+        FilterType::Triangle,
+    )
 }
 
 /// Flat, toy-like skin: keep only broad regional colour (lips, cheeks, nipples,
@@ -313,7 +327,10 @@ fn cartoon_eyes(image: &mut image::RgbaImage, strength: f32) {
             centre[0] - CARTOON_IRIS * 0.35,
             centre[1] - CARTOON_IRIS * 0.35,
         );
-        let glint = edge(((u - hu).powi(2) + (v - hv).powi(2)).sqrt(), CARTOON_IRIS * 0.2);
+        let glint = edge(
+            ((u - hu).powi(2) + (v - hv).powi(2)).sqrt(),
+            CARTOON_IRIS * 0.2,
+        );
         for c in 0..3 {
             colour[c] += (255. - colour[c]) * glint;
             p[c] = (p[c] as f32 + (colour[c] - p[c] as f32) * strength).round() as u8;

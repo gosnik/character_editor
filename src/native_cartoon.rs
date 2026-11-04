@@ -19,7 +19,11 @@ pub fn stylise_part(name: &str, material: &mut Value, strength: f32) {
     }
     // Strand-card beards read as speckles at toy scale; their cards are made solid
     // like brows (a painted stubble layer underneath is added in `native_character`).
-    let kind = if material["cartoonBeard"] == true { "brows" } else { kind };
+    let kind = if material["cartoonBeard"] == true {
+        "brows"
+    } else {
+        kind
+    };
     if !kind.is_empty() {
         material["cartoonDetail"] = json!(strength);
         material["cartoonKind"] = json!(kind);

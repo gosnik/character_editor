@@ -92,18 +92,29 @@ fn same_body_identity_and_morphed_body_follow_anchors() {
 #[test]
 fn adaptive_identity_preserves_valid_rounded_reference_weights() {
     let lib = library();
-    let mut garment = import_obj(&lib,
+    let mut garment = import_obj(
+        &lib,
         "v 0 0 1\nv 1 0 1\nv 0 1 1\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n",
-        "rounded-weights", "top", "dm").unwrap();
+        "rounded-weights",
+        "top",
+        "dm",
+    )
+    .unwrap();
     garment.refs = vec![[0; 3]; 3];
     garment.weights = vec![[1.0005, 0., 0.]; 3];
     garment.validate().unwrap();
     let neutral = vec![[0., 0., 0.], [10., 0., 0.], [0., 10., 0.], [10., 10., 0.]];
     for translation in [[0., 0., 0.], [2., -3., 4.]] {
-        let current: Vec<_> = neutral.iter().map(|p| std::array::from_fn(|i| p[i] + translation[i])).collect();
-        let field = BodyDeformation::new(&neutral, &current, &[0, 1, 2, 2], &[1, 1, 1, 255]).unwrap();
-        assert_eq!(garment.fit(&current).unwrap().positions,
-                   garment.fit_adaptive(&current, &field).unwrap().positions);
+        let current: Vec<_> = neutral
+            .iter()
+            .map(|p| std::array::from_fn(|i| p[i] + translation[i]))
+            .collect();
+        let field =
+            BodyDeformation::new(&neutral, &current, &[0, 1, 2, 2], &[1, 1, 1, 255]).unwrap();
+        assert_eq!(
+            garment.fit(&current).unwrap().positions,
+            garment.fit_adaptive(&current, &field).unwrap().positions
+        );
     }
 }
 
@@ -113,8 +124,11 @@ fn adaptive_custom_garments_transport_offsets_for_every_slot() {
     let mut garment = import_obj(
         &lib,
         "v 0 0 1\nv 1 0 1\nv 0 1 1\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n",
-        "adaptive", "top", "dm",
-    ).unwrap();
+        "adaptive",
+        "top",
+        "dm",
+    )
+    .unwrap();
     let neutral = vec![[0., 0., 0.], [10., 0., 0.], [0., 10., 0.], [10., 10., 0.]];
     let current = vec![[0., 0., 0.], [20., 0., 0.], [0., 30., 0.], [20., 30., 0.]];
     let field = BodyDeformation::new(&neutral, &current, &[0, 1, 2, 2], &[1, 1, 1, 255]).unwrap();
@@ -122,12 +136,29 @@ fn adaptive_custom_garments_transport_offsets_for_every_slot() {
     garment.reference_points_dm = vec![[0., 0., 0.], [5., 0., 0.], [0., 5., 0.]];
     garment.refs = vec![[0, 0, 0], [0, 1, 2], [0, 1, 2]];
     garment.weights = vec![[1., 0., 0.], [0.5, 0.5, 0.], [0.25, 0.25, 0.5]];
-    for slot in [GarmentSlot::Hair, GarmentSlot::Beard, GarmentSlot::Top, GarmentSlot::Bottom,
-                 GarmentSlot::Jacket, GarmentSlot::Feet, GarmentSlot::Hat, GarmentSlot::Accessory] {
+    for slot in [
+        GarmentSlot::Hair,
+        GarmentSlot::Beard,
+        GarmentSlot::Top,
+        GarmentSlot::Bottom,
+        GarmentSlot::Jacket,
+        GarmentSlot::Feet,
+        GarmentSlot::Hat,
+        GarmentSlot::Accessory,
+    ] {
         garment.slot = slot;
         let fitted = garment.fit_adaptive(&current, &field).unwrap();
-        assert!((fitted.positions[0][0] - 2.).abs() < 0.01, "direct reference offset did not scale");
-        assert!(fitted.positions.iter().flatten().all(|value| value.is_finite()));
+        assert!(
+            (fitted.positions[0][0] - 2.).abs() < 0.01,
+            "direct reference offset did not scale"
+        );
+        assert!(
+            fitted
+                .positions
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        );
     }
 }
 

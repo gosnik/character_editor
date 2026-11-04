@@ -100,7 +100,10 @@ pub fn native_catalog_with_assets(root: &std::path::Path) -> Value {
 }
 impl AraRecipe {
     fn clear_builtin_garment_conflict(&mut self, slot: &crate::wardrobe_assets::GarmentSlot) {
-        if !matches!(slot, crate::wardrobe_assets::GarmentSlot::Hair | crate::wardrobe_assets::GarmentSlot::Beard) {
+        if !matches!(
+            slot,
+            crate::wardrobe_assets::GarmentSlot::Hair | crate::wardrobe_assets::GarmentSlot::Beard
+        ) {
             self.params["outfit"] = json!("none");
         }
         match slot {

@@ -1052,7 +1052,12 @@ fn wardrobe_command(cli: &Cli, command: &WardrobeCommand) -> Result<(), String> 
             include_beard,
         } => {
             let recipe = source_recipe(source, &cli.assets)?;
-            let profile = WardrobeProfile::capture_with_beard(&recipe, wardrobe_name, *include_hair, *include_beard)?;
+            let profile = WardrobeProfile::capture_with_beard(
+                &recipe,
+                wardrobe_name,
+                *include_hair,
+                *include_beard,
+            )?;
             if output == Path::new("-") {
                 emit(&serde_json::to_value(&profile).map_err(|e| e.to_string())?)
             } else {

@@ -777,15 +777,26 @@ pub fn arm_clearance(lib: &NativeLibrary, coords: &[[f32; 3]]) -> Result<f32, St
     let source = source_bones(&lib.base.meta)?;
     let arm = |name: &str| {
         let stem = name.split('.').next().unwrap_or("");
-        ["clavicle", "shoulder", "upperarm", "lowerarm", "wrist", "metacarpal", "finger"]
-            .iter()
-            .any(|p| stem.starts_with(p))
+        [
+            "clavicle",
+            "shoulder",
+            "upperarm",
+            "lowerarm",
+            "wrist",
+            "metacarpal",
+            "finger",
+        ]
+        .iter()
+        .any(|p| stem.starts_with(p))
     };
     let offsets = array(&lib.base, "wOff")?.u32()?;
     let bones = array(&lib.base, "wBone")?.u8()?;
     let values = array(&lib.base, "wVal")?.f32()?;
-    let surface: std::collections::BTreeSet<u32> =
-        array(&lib.base, "faceVerts")?.u32()?.iter().copied().collect();
+    let surface: std::collections::BTreeSet<u32> = array(&lib.base, "faceVerts")?
+        .u32()?
+        .iter()
+        .copied()
+        .collect();
     let mut widest = f32::MIN;
     for side in ["L", "R"] {
         let shoulder = joint(&format!("upperarm01.{side}____head"))?;

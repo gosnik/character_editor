@@ -201,7 +201,7 @@ fn finish_builds(
                     {
                         material.base_color_texture =
                             load_image(&texture_path, true, &part.material)
-                        .map(|image| images.add(image));
+                                .map(|image| images.add(image));
                     }
                 }
                 let explicit_pattern = part.material["pattern"].as_str();
@@ -245,7 +245,8 @@ fn finish_builds(
                         .filter(|texture_path| texture_path.is_file())
                     {
                         material.normal_map_texture =
-                            load_image(&texture_path, false, &serde_json::Value::Null).map(|image| images.add(image));
+                            load_image(&texture_path, false, &serde_json::Value::Null)
+                                .map(|image| images.add(image));
                     }
                 }
                 let (joints, weights) = character
