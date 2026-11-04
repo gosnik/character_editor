@@ -1,0 +1,117 @@
+{
+ "schema": "cartoon-hm08-v2",
+ "units": "makehuman-decimetres",
+ "topology": "hm08 (19158 vertices, unchanged order/groups/UVs)",
+ "sources": {
+  "female": {
+   "file": "Meshy_AI_Blank_Character_Model_F.glb",
+   "sha256": "55e060ebdbad02e646d8a8315943346bd22a2b2a6350199472d11f3a3ffa324d"
+  },
+  "male": {
+   "file": "Meshy_AI_Blank_Character_Model_M.glb",
+   "sha256": "908a339fc9af5dd2440def1a9c2162b0501786200f468dc6766dd0536ff14566"
+  }
+ },
+ "makehuman_base_sha256": "8e761e6624b8f54536409135d1636da63b32486a90d4897f84e121d144f6fb4c",
+ "fits": {
+  "female": {
+   "hm_ids": {
+    "eye_outer": 7754,
+    "eye_inner": 6850,
+    "eye_upper": 6785,
+    "eye_lower": 6828,
+    "nose_tip": 302,
+    "subnasale": 312,
+    "ala": 7102,
+    "mouth_corner": 10402,
+    "upper_lip": 474,
+    "lower_lip": 492,
+    "chin": 5162,
+    "ear_top": 7578,
+    "ear_lobe": 12329,
+    "ear_back": 7581,
+    "thumb_tip": 9348,
+    "index_tip": 8595,
+    "middle_tip": 8787,
+    "ring_tip": 8982,
+    "pinky_tip": 9171,
+    "toe1_tip": 12756,
+    "toe2_tip": 11628,
+    "toe3_tip": 11621,
+    "toe4_tip": 12480,
+    "toe5_tip": 12660
+   },
+   "eyeball": {
+    "centre": [
+     0.6861363618377267,
+     7.38521114735682,
+     0.5228589163922542
+    ],
+    "radius": 0.5754018032843947
+   },
+   "metrics": {
+    "surface_mean_dm": 0.022146532289703574,
+    "surface_p95_dm": 0.07007900173069197,
+    "surface_max_dm": 0.19327940650574385,
+    "flipped_quad_fraction": 0.00956794737628943,
+    "height_dm": 19.001722049010638
+   }
+  },
+  "male": {
+   "hm_ids": {
+    "eye_outer": 7754,
+    "eye_inner": 6850,
+    "eye_upper": 6785,
+    "eye_lower": 6828,
+    "nose_tip": 302,
+    "subnasale": 312,
+    "ala": 7102,
+    "mouth_corner": 10402,
+    "upper_lip": 474,
+    "lower_lip": 492,
+    "chin": 5162,
+    "ear_top": 7578,
+    "ear_lobe": 12329,
+    "ear_back": 7581,
+    "thumb_tip": 9348,
+    "index_tip": 8595,
+    "middle_tip": 8787,
+    "ring_tip": 8982,
+    "pinky_tip": 9171,
+    "toe1_tip": 12756,
+    "toe2_tip": 11628,
+    "toe3_tip": 11621,
+    "toe4_tip": 12480,
+    "toe5_tip": 12660
+   },
+   "eyeball": {
+    "centre": [
+     0.5522076691268474,
+     7.826623547045473,
+     0.20979706142981044
+    ],
+    "radius": 0.5247312132374028
+   },
+   "metrics": {
+    "surface_mean_dm": 0.02304948739108849,
+    "surface_p95_dm": 0.07277447308653939,
+    "surface_max_dm": 0.18617265366678665,
+    "flipped_quad_fraction": 0.01210943339811631,
+    "height_dm": 19.003305440122897
+   }
+  }
+ },
+ "reference_height_dm": {
+  "female": 15.897866666666665,
+  "male": 17.304000000000002
+ },
+ "eyelid_closure_scales": {
+  "expression/units/african/eye-left-closure": 2.203,
+  "expression/units/african/eye-right-closure": 2.203,
+  "expression/units/asian/eye-left-closure": 2.201,
+  "expression/units/asian/eye-right-closure": 2.201,
+  "expression/units/caucasian/eye-left-closure": 2.203,
+  "expression/units/caucasian/eye-right-closure": 2.203
+ },
+ "convention": "one more morph on top of MakeHuman's own targets, not a replacement\nfor them: gender, age, weight, muscle, breasts and every detail target keep their\nauthored behaviour and range, and a single Cartoon amount adds\n\n    amount * ((1 - gender) * cartoon-female + gender * cartoon-male)\n\nwhere cartoon-female/-male are the fitted cartoon shapes minus the default-macro\nrealistic shapes.  Each is split into head, body and chest parts: children keep the full\ncartoon head, a lighter body offset and no adult chest, all blending in from age 12\nto 18.  The editor scales them by the body's height relative to the adult\ndefault so children and short characters receive proportionate offsets.\n\nExpression units get an additive correction (retargeted unit minus realistic unit) so\nblinks and smiles span the larger cartoon eyes and mouth; it is weighted by the same\namount."
+}

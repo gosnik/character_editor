@@ -1,0 +1,233 @@
+/** Shooter set: rifle and pistol holds, firing, reload, grenade, death. */
+import { type Ch, type Clip, type HandTarget, type Sample } from './types';
+import { fingers, grip, lerp3, side, track, v } from './helpers';
+import { gait, RUN, strafe, WALK, type Gait } from './gait';
+
+// --- Shooter (rifle) -----------------------------------------------------------------------
+// Hands are placed by IK in chest space; the weapon itself is supplied by the game
+// (attach it to RightHand). Right-handed, rifle along +Z.
+
+type Hold = { Left: HandTarget; Right: HandTarget };
+
+// Shouldered aim: stock in the right shoulder pocket, grip below the bore, support hand on the handguard.
+const AIM: Hold = {
+  Right: { pos: v(-0.13, -0.19, 0.22), pole: v(-1, -0.9, -0.2), dir: v(0.1, -0.55, 0.83), palm: v(1, 0, 0) },
+  Left: { pos: v(-0.01, -0.13, 0.5), pole: v(0.4, -1, 0), dir: v(-0.35, 0.2, 0.91), palm: v(0, 1, 0), support: 'rifle' },
+};
+// Low ready: same hold, muzzle angled down ~40 degrees.
+const READY: Hold = {
+  Right: { pos: v(-0.15, -0.36, 0.17), pole: v(-1, -0.6, -0.4), dir: v(0.1, -0.75, 0.65), palm: v(1, 0, 0) },
+  Left: { pos: v(0.03, -0.42, 0.4), pole: v(0.6, -1, 0), dir: v(-0.35, 0.05, 0.93), palm: v(0, 1, 0), support: 'rifle' },
+};
+// Sprint: rifle carried diagonally across the chest.
+const SPRINT: Hold = {
+  Right: { pos: v(-0.17, -0.42, 0.13), pole: v(-1, -0.5, -0.5), dir: v(0.3, -0.75, 0.55), palm: v(1, 0, 0) },
+  Left: { pos: v(0.12, -0.2, 0.27), pole: v(0.8, -1, 0), dir: v(-0.6, 0.35, 0.7), palm: v(0, 1, 0), support: 'rifle' },
+};
+
+/** Upper body for a rifle hold: shoulders square, head on the sights when aiming. */
+function rifleUpper(out: Record<string, Ch>, aiming: boolean, breathe = 0) {
+  out.Spine1 = [(aiming ? 4 : 2) + breathe, (out.Spine1?.[1] ?? 0), 0];
+  out.Spine2 = [(aiming ? 3 : 1) + breathe * 0.5, (out.Spine2?.[1] ?? 0), 0];
+  out.Neck = [aiming ? 6 : 0, aiming ? -6 : 0, 0];
+  out.Head = [aiming ? 10 : 4, aiming ? -8 : 0, aiming ? -4 : 0];
+  grip(out, 'Right', true);
+  grip(out, 'Left');
+}
+
+/** Bladed shooter stance (left foot forward). */
+function stance(out: Record<string, Ch>, crouch = false) {
+  if (crouch) {
+    side(out, 'UpLeg', [72, 0, 4], [65, 0, 2]);
+    side(out, 'Leg', [-105, 0, 0], [-120, 0, 0]);
+    side(out, 'Foot', [30, 0, 0], [40, 0, 0]);
+    out.Spine = [16, 0, 0];
+  } else {
+    side(out, 'UpLeg', [8, 0, -1], [-6, 0, 0]);
+    side(out, 'Leg', [-8, 0, 0], [-4, 0, 0]);
+    side(out, 'Foot', [2, 0, 0], [0, 0, 0]);
+  }
+}
+
+const hold = (h: Hold, recoil = 0): Sample['ik'] => ({
+  Right: { ...h.Right, pos: v(h.Right.pos[0], h.Right.pos[1] + recoil * 0.015, h.Right.pos[2] - recoil * 0.035) },
+  Left: { ...h.Left, pos: v(h.Left.pos[0], h.Left.pos[1] + recoil * 0.02, h.Left.pos[2] - recoil * 0.03) },
+});
+
+function rifleLoop(id: string, name: string, duration: number, legs: (t: number) => Sample | null, h: Hold, aiming: boolean, travel?: [number, number, number], crouch = false): Clip {
+  return {
+    id, name, category: 'Shooter', duration, loop: true, travel,
+    sample: (t) => {
+      const base = legs(t);
+      const out: Record<string, Ch> = {};
+      if (base) for (const [k, ch] of Object.entries(base.bones)) if (/(UpLeg|Leg|Foot|ToeBase|Hips|Spine$)/.test(k)) out[k] = ch;
+      if (!base) stance(out, crouch);
+      if (crouch && base) {
+        // Crouched stepping: deepen the knees on top of the gait.
+        for (const s of ['Left', 'Right']) {
+          out[`${s}UpLeg`] = [(out[`${s}UpLeg`]?.[0] ?? 0) * 0.5 + 62, 0, 4 * (s === 'Left' ? 1 : -1)];
+          out[`${s}Leg`] = [(out[`${s}Leg`]?.[0] ?? 0) * 0.5 - 100, 0, 0];
+          out[`${s}Foot`] = [(out[`${s}Foot`]?.[0] ?? 0) * 0.5 + 28, 0, 0];
+        }
+        out.Spine = [16, out.Spine?.[1] ?? 0, 0];
+      }
+      // Keep the chest (and the rifle) facing forward while the hips swing.
+      const hipYaw = out.Hips?.[1] ?? 0;
+      out.Spine1 = [0, -hipYaw * 0.6, 0];
+      out.Spine2 = [0, -hipYaw * 0.4, 0];
+      const breathe = Math.sin((t / duration) * Math.PI * 2) * (base ? 0 : 1);
+      rifleUpper(out, aiming, breathe);
+      return { bones: out, root: base ? { ...base.root, ground: true } : { ground: true }, ik: hold(h) };
+    },
+  };
+}
+
+const still = () => null;
+const gaitOf = (g: Gait, d: number, reverse = false) => (t: number) => gait(g, t / d, reverse);
+const strafeLegs = (left: boolean) => {
+  const c = strafe(left);
+  return (t: number) => c.sample(t);
+};
+const RIFLE_WALK: Gait = { ...WALK, arm: WALK.arm.map(() => 0), pelvisYaw: 3 };
+const RIFLE_RUN: Gait = { ...RUN, arm: RUN.arm.map(() => 0), pelvisYaw: 5, spineLean: 8 };
+const CROUCH_WALK: Gait = { ...WALK, thigh: WALK.thigh.map((x) => x * 0.8), knee: WALK.knee.map((x) => x * 0.6), bob: WALK.bob.map(() => 0) };
+
+const rifleFire = (auto: boolean): Clip => ({
+  id: auto ? 'rifle_fire_auto' : 'rifle_fire', name: auto ? 'Rifle fire (full auto)' : 'Rifle fire (single)', category: 'Shooter',
+  duration: auto ? 0.4 : 0.45, loop: auto,
+  sample: (t) => {
+    const out: Record<string, Ch> = {};
+    stance(out);
+    // Recoil kick: sharp rise, quick settle (4 shots per loop for auto).
+    const ph = auto ? (t % 0.1) / 0.1 : t / 0.45;
+    const kick = auto ? Math.exp(-ph * 5) * 0.8 : track([0, 0.04, 0.12, 0.45], [0, 1, 0.35, 0])(t);
+    rifleUpper(out, true);
+    out.Spine2 = [3 - 3 * kick, 0, 0];
+    out.Head = [10 - 3 * kick, -8, -4];
+    return { bones: out, root: { ground: true }, ik: hold(AIM, kick) };
+  },
+});
+
+const reload: Clip = {
+  id: 'rifle_reload', name: 'Rifle reload', category: 'Shooter', duration: 2.2, loop: false,
+  sample: (t) => {
+    const out: Record<string, Ch> = {};
+    stance(out);
+    rifleUpper(out, false);
+    // Rifle canted up a little; left hand: handguard -> magazine -> pouch -> magazine -> slap -> handguard.
+    const T = [0, 0.3, 0.6, 1.0, 1.35, 1.6, 1.75, 2.2];
+    const right = lerp3(READY.Right.pos, v(-0.13, -0.3, 0.24), track([0, 0.3, 1.9, 2.2], [0, 1, 1, 0])(t));
+    const mag = v(-0.05, -0.44, 0.3), pouch = v(0.13, -0.68, 0.1), slap = v(-0.04, -0.36, 0.28);
+    const pts = [READY.Left.pos, READY.Left.pos, mag, pouch, mag, slap, READY.Left.pos, READY.Left.pos];
+    const lp = v(track(T, pts.map((p) => p[0]))(t), track(T, pts.map((p) => p[1]))(t), track(T, pts.map((p) => p[2]))(t));
+    out.Head = [track([0, 0.3, 1.8, 2.2], [4, 22, 22, 4])(t), track([0, 0.3, 1.8, 2.2], [0, -10, -10, 0])(t), 0];
+    const open = track([0, 0.5, 0.65, 0.9, 1.0, 1.6, 1.75], [1, 1, 0.3, 0.3, 1, 1, 1])(t);
+    grip(out, 'Left', false, open);
+    return {
+      bones: out, root: { ground: true },
+      ik: {
+        Right: { ...READY.Right, pos: right },
+        Left: { pos: lp, pole: v(0.5, -1, -0.2), dir: v(-0.3, -0.2, 0.9), palm: v(-0.2, 1, 0) },
+      },
+    };
+  },
+};
+
+const grenade: Clip = {
+  id: 'throw_grenade', name: 'Throw grenade', category: 'Shooter', duration: 1.5, loop: false,
+  sample: (t) => {
+    const T = [0, 0.35, 0.7, 0.85, 1.05, 1.5];
+    const k = (vals: number[]) => track(T, vals)(t);
+    const out: Record<string, Ch> = {
+      Hips: [0, k([0, -15, -25, 10, 20, 0]), 0],
+      Spine1: [k([0, -5, -12, 10, 15, 0]), k([0, -15, -25, 15, 20, 0]), 0],
+      Head: [0, k([0, 10, 20, -10, -15, 0]), 0],
+    };
+    side(out, 'UpLeg', [k([6, 15, 20, 5, 0, 6]), 0, 0], [k([-4, -10, -15, 10, 15, -4]), 0, 0]);
+    side(out, 'Leg', [k([-6, -10, -15, -20, -10, -6]), 0, 0], [k([-4, -20, -25, -5, -5, -4]), 0, 0]);
+    side(out, 'Arm', [k([10, 50, 70, 40, 20, 10]), 0, k([4, 20, 25, 10, 5, 4])], [k([0, -20, -40, 110, 60, 0]), 0, k([4, 70, 95, 60, 20, 4])]);
+    side(out, 'ForeArm', [k([12, 20, 20, 15, 15, 12]), 0, 0], [k([12, 90, 120, 20, 30, 12]), 0, 0]);
+    side(out, 'Shoulder', [0, 0, 0], [0, 0, k([0, 8, 15, 10, 0, 0])]);
+    fingers(out, 14);
+    out.RightHandIndex1 = [k([14, 70, 70, 10, 10, 14]), 0, 0];
+    out.RightHandMiddle1 = [k([14, 70, 70, 10, 10, 14]), 0, 0];
+    out.RightHandRing1 = [k([14, 70, 70, 10, 10, 14]), 0, 0];
+    return { bones: out, root: { ground: true } };
+  },
+};
+
+
+// --- Pistol --------------------------------------------------------------------------------
+// Two-handed isosceles grip: arms extended, support hand wrapped around the firing hand.
+const PISTOL_AIM: Hold = {
+  Right: { pos: v(-0.05, -0.14, 0.5), pole: v(-0.6, -1, 0), dir: v(0.05, -0.25, 0.97), palm: v(1, 0, 0) },
+  Left: { pos: v(0.03, -0.17, 0.47), pole: v(0.6, -1, 0), dir: v(-0.45, -0.2, 0.87), palm: v(-0.6, 0.4, 0.2) },
+};
+const PISTOL_READY: Hold = {
+  Right: { pos: v(-0.05, -0.46, 0.3), pole: v(-0.6, -1, 0), dir: v(0.05, -0.75, 0.66), palm: v(1, 0, 0) },
+  Left: { pos: v(0.03, -0.48, 0.27), pole: v(0.6, -1, 0), dir: v(-0.45, -0.6, 0.6), palm: v(-0.6, 0.4, 0.2) },
+};
+function pistolUpper(out: Record<string, Ch>, aiming: boolean) {
+  out.Spine1 = [aiming ? 6 : 3, 0, 0];
+  out.Neck = [aiming ? 6 : 0, 0, 0];
+  out.Head = [aiming ? 6 : 6, 0, 0];
+  grip(out, 'Right', true);
+  grip(out, 'Left');
+}
+const pistolIdle: Clip = {
+  id: 'pistol_idle', name: 'Pistol idle (low ready)', category: 'Shooter', duration: 3, loop: true,
+  sample: (t) => {
+    const out: Record<string, Ch> = {};
+    stance(out);
+    pistolUpper(out, false);
+    out.Spine = [Math.sin((t / 3) * Math.PI * 2), 0, 0];
+    return { bones: out, root: { ground: true }, ik: PISTOL_READY };
+  },
+};
+const pistolAim: Clip = {
+  id: 'pistol_aim', name: 'Pistol aim', category: 'Shooter', duration: 2.5, loop: true,
+  sample: (t) => {
+    const out: Record<string, Ch> = {};
+    stance(out);
+    pistolUpper(out, true);
+    out.Spine = [0.8 * Math.sin((t / 2.5) * Math.PI * 2), 0, 0];
+    return { bones: out, root: { ground: true }, ik: PISTOL_AIM };
+  },
+};
+const pistolFire: Clip = {
+  id: 'pistol_fire', name: 'Pistol fire', category: 'Shooter', duration: 0.5, loop: false,
+  sample: (t) => {
+    const out: Record<string, Ch> = {};
+    stance(out);
+    pistolUpper(out, true);
+    // Muzzle flip: hands rise and rotate up, then settle.
+    const k = track([0, 0.04, 0.14, 0.5], [0, 1, 0.3, 0])(t);
+    const flip = (h: HandTarget, up: number): HandTarget => ({
+      ...h, pos: v(h.pos[0], h.pos[1] + 0.03 * k, h.pos[2] - 0.02 * k), dir: v(h.dir![0], h.dir![1] + up * k, h.dir![2]),
+    });
+    return { bones: out, root: { ground: true }, ik: { Right: flip(PISTOL_AIM.Right, 0.45), Left: flip(PISTOL_AIM.Left, 0.3) } };
+  },
+};
+
+export const PISTOL: Clip[] = [
+  pistolIdle,
+  pistolAim,
+  pistolFire,
+];
+
+export const RIFLE: Clip[] = [
+  rifleLoop('rifle_idle', 'Rifle idle (low ready)', 3, still, READY, false),
+  rifleLoop('rifle_aim', 'Rifle aim idle', 2.5, still, AIM, true),
+  rifleFire(false),
+  rifleFire(true),
+  reload,
+  rifleLoop('rifle_walk', 'Rifle walk (aiming)', 1.1, gaitOf(RIFLE_WALK, 1.1), AIM, true, [0, 0, 1.3]),
+  rifleLoop('rifle_walk_back', 'Rifle walk back (aiming)', 1.25, gaitOf(RIFLE_WALK, 1.25, true), AIM, true, [0, 0, -1.0]),
+  rifleLoop('rifle_strafe_left', 'Rifle strafe left (aiming)', 0.9, strafeLegs(true), AIM, true, [1.1, 0, 0]),
+  rifleLoop('rifle_strafe_right', 'Rifle strafe right (aiming)', 0.9, strafeLegs(false), AIM, true, [-1.1, 0, 0]),
+  rifleLoop('rifle_run', 'Rifle run', 0.72, gaitOf(RIFLE_RUN, 0.72), READY, false, [0, 0, 3.4]),
+  rifleLoop('rifle_sprint', 'Rifle sprint', 0.62, gaitOf({ ...RIFLE_RUN, spineLean: 16, thigh: RUN.thigh.map((x) => x * 1.15) }, 0.62), SPRINT, false, [0, 0, 5.2]),
+  rifleLoop('rifle_crouch_aim', 'Crouch aim idle', 2.5, still, AIM, true, undefined, true),
+  rifleLoop('rifle_crouch_walk', 'Crouch walk (aiming)', 1.2, gaitOf(CROUCH_WALK, 1.2), AIM, true, [0, 0, 0.8], true),
+  grenade,
+];

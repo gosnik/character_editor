@@ -1,0 +1,173 @@
+{
+  "source_commit": "a8bc2d54ff0ac92e78ff71431b1023eda42bf482",
+  "targets": [
+    {
+      "id": "height",
+      "label": "Height",
+      "category": "Body",
+      "negative": "data/targets/macrodetails/height/male-young-averagemuscle-averageweight-minheight.target",
+      "positive": "data/targets/macrodetails/height/male-young-averagemuscle-averageweight-maxheight.target"
+    },
+    {
+      "id": "nose_width",
+      "label": "Nose width",
+      "category": "Face",
+      "negative": "data/targets/nose/nose-width1-decr.target",
+      "positive": "data/targets/nose/nose-width1-incr.target"
+    },
+    {
+      "id": "mouth_width",
+      "label": "Mouth width",
+      "category": "Face",
+      "negative": "data/targets/mouth/mouth-scale-horiz-decr.target",
+      "positive": "data/targets/mouth/mouth-scale-horiz-incr.target"
+    },
+    {
+      "id": "chin_width",
+      "label": "Chin width",
+      "category": "Face",
+      "negative": "data/targets/chin/chin-width-decr.target",
+      "positive": "data/targets/chin/chin-width-incr.target"
+    },
+    {
+      "id": "torso_width",
+      "label": "Torso width",
+      "category": "Torso",
+      "negative": "data/targets/torso/torso-scale-horiz-decr.target",
+      "positive": "data/targets/torso/torso-scale-horiz-incr.target"
+    },
+    {
+      "id": "torso_depth",
+      "label": "Torso depth",
+      "category": "Torso",
+      "negative": "data/targets/torso/torso-scale-depth-decr.target",
+      "positive": "data/targets/torso/torso-scale-depth-incr.target"
+    },
+    {
+      "id": "upperleg_height",
+      "label": "Upper leg height",
+      "category": "Limbs",
+      "negative": "data/targets/armslegs/upperlegs-height-decr.target",
+      "positive": "data/targets/armslegs/upperlegs-height-incr.target"
+    },
+    {
+      "id": "lowerleg_height",
+      "label": "Lower leg height",
+      "category": "Limbs",
+      "negative": "data/targets/armslegs/lowerlegs-height-decr.target",
+      "positive": "data/targets/armslegs/lowerlegs-height-incr.target"
+    },
+    {
+      "id": "head_width",
+      "label": "Head width",
+      "category": "Face",
+      "negative": "data/targets/head/head-scale-horiz-decr.target",
+      "positive": "data/targets/head/head-scale-horiz-incr.target"
+    },
+    {
+      "id": "head_height",
+      "label": "Head height",
+      "category": "Face",
+      "negative": "data/targets/head/head-scale-vert-decr.target",
+      "positive": "data/targets/head/head-scale-vert-incr.target"
+    },
+    {
+      "id": "head_depth",
+      "label": "Head depth",
+      "category": "Face",
+      "negative": "data/targets/head/head-scale-depth-decr.target",
+      "positive": "data/targets/head/head-scale-depth-incr.target"
+    },
+    {
+      "id": "neck_width",
+      "label": "Neck width",
+      "category": "Body",
+      "negative": "data/targets/neck/neck-scale-horiz-decr.target",
+      "positive": "data/targets/neck/neck-scale-horiz-incr.target"
+    },
+    {
+      "id": "neck_height",
+      "label": "Neck height",
+      "category": "Body",
+      "negative": "data/targets/neck/neck-scale-vert-decr.target",
+      "positive": "data/targets/neck/neck-scale-vert-incr.target"
+    },
+    {
+      "id": "nose_depth",
+      "label": "Nose depth",
+      "category": "Face",
+      "negative": "data/targets/nose/nose-scale-depth-decr.target",
+      "positive": "data/targets/nose/nose-scale-depth-incr.target"
+    },
+    {
+      "id": "nose_height",
+      "label": "Nose height",
+      "category": "Face",
+      "negative": "data/targets/nose/nose-scale-vert-decr.target",
+      "positive": "data/targets/nose/nose-scale-vert-incr.target"
+    },
+    {
+      "id": "mouth_height",
+      "label": "Mouth height",
+      "category": "Face",
+      "negative": "data/targets/mouth/mouth-scale-vert-decr.target",
+      "positive": "data/targets/mouth/mouth-scale-vert-incr.target"
+    },
+    {
+      "id": "left_eye_size",
+      "label": "Left eye opening",
+      "category": "Face",
+      "negative": "data/targets/eyes/l-eye-scale-decr.target",
+      "positive": "data/targets/eyes/l-eye-scale-incr.target"
+    },
+    {
+      "id": "right_eye_size",
+      "label": "Right eye opening",
+      "category": "Face",
+      "negative": "data/targets/eyes/r-eye-scale-decr.target",
+      "positive": "data/targets/eyes/r-eye-scale-incr.target"
+    },
+    {
+      "id": "left_ear_size",
+      "label": "Left ear size",
+      "category": "Face",
+      "negative": "data/targets/ears/l-ear-scale-decr.target",
+      "positive": "data/targets/ears/l-ear-scale-incr.target"
+    },
+    {
+      "id": "right_ear_size",
+      "label": "Right ear size",
+      "category": "Face",
+      "negative": "data/targets/ears/r-ear-scale-decr.target",
+      "positive": "data/targets/ears/r-ear-scale-incr.target"
+    },
+    {
+      "id": "left_hand_size",
+      "label": "Left hand size",
+      "category": "Limbs",
+      "negative": "data/targets/armslegs/l-hand-scale-decr.target",
+      "positive": "data/targets/armslegs/l-hand-scale-incr.target"
+    },
+    {
+      "id": "right_hand_size",
+      "label": "Right hand size",
+      "category": "Limbs",
+      "negative": "data/targets/armslegs/r-hand-scale-decr.target",
+      "positive": "data/targets/armslegs/r-hand-scale-incr.target"
+    },
+    {
+      "id": "left_foot_size",
+      "label": "Left foot size",
+      "category": "Limbs",
+      "negative": "data/targets/armslegs/l-foot-scale-decr.target",
+      "positive": "data/targets/armslegs/l-foot-scale-incr.target"
+    },
+    {
+      "id": "right_foot_size",
+      "label": "Right foot size",
+      "category": "Limbs",
+      "negative": "data/targets/armslegs/r-foot-scale-decr.target",
+      "positive": "data/targets/armslegs/r-foot-scale-incr.target"
+    }
+  ]
+}

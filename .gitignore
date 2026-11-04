@@ -1,0 +1,8 @@
+/target/
+/exports/
+__pycache__/
+*.pyc
+# Ara's npm packages and its downloaded MakeHuman/mocap sources: restore with
+# `npm ci` and `npm run setup-assets` in vendor/ara (see vendor/ara/README.md).
+/vendor/ara/node_modules/
+/vendor/ara/vendor/

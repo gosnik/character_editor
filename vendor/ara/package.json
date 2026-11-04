@@ -1,0 +1,55 @@
+{
+  "name": "3d-gen",
+  "version": "0.1.0",
+  "description": "Open-source, self-hosted generator for realistic, rigged and animated 3D human characters. Exports GLB, FBX and OBJ.",
+  "homepage": "https://ara3dgen.com",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "3d",
+    "character-generator",
+    "game-development",
+    "gamedev",
+    "rigging",
+    "animation",
+    "glb",
+    "gltf",
+    "fbx",
+    "obj",
+    "makehuman",
+    "three.js",
+    "avatar",
+    "procedural"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && tsx scripts/build-docs.ts",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "export": "tsx scripts/export-cli.ts",
+    "test": "tsx scripts/selftest.ts",
+    "setup-assets": "tsx scripts/setup-assets.ts",
+    "build-assets": "tsx scripts/build-assets.ts",
+    "test:gltf": "tsx scripts/gltf-check.ts",
+    "build-mocap": "tsx scripts/build-mocap.ts",
+    "test:ui": "tsx scripts/ui-check.ts"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/three": "^0.186.0",
+    "marked": "^15.0.12",
+    "sharp": "^0.35.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  },
+  "packageManager": "pnpm@10.19.0+sha512.c9fc7236e92adf5c8af42fd5bf1612df99c2ceb62f27047032f4720b33f8eacdde311865e91c411f2774f618d82f320808ecb51718bfa82c060c4ba7c76a32b8"
+}

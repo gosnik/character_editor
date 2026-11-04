@@ -1,0 +1,41 @@
+{
+  "_doc": "Hand-picked landmark picks, left side (+X) or midline. view: front (u=x,v=y, ray -Z), side (from +X; u=-z, v=y), bottom (u=x, v=z, ray +Y), back (u=-x, v=y, ray +Z). hm08 picks are made on the default-macro female shape and resolved to vertex indices; they apply to every hm08 shape. Units: decimetres.",
+  "hm08": {
+    "eye_outer":   ["front", 0.398, 6.678], "eye_inner": ["front", 0.155, 6.655],
+    "eye_upper":   ["front", 0.28, 6.715],  "eye_lower": ["front", 0.28, 6.625],
+    "nose_tip":    ["front", 0.001, 6.33],  "subnasale": ["front", 0.001, 6.27], "ala": ["front", 0.163, 6.344],
+    "mouth_corner":["front", 0.208, 6.056], "upper_lip": ["front", 0.001, 6.075], "lower_lip": ["front", 0.001, 5.96],
+    "chin":        ["front", 0.001, 5.82],
+    "ear_top":     ["side", -0.378, 6.70], "ear_lobe": ["side", -0.50, 6.22], "ear_back": ["side", -0.27, 6.556]
+  },
+  "meshy_f": {
+    "eye_outer":   ["front", 1.04, 7.38], "eye_inner": ["front", 0.33, 7.40],
+    "eye_upper":   ["front", 0.68, 7.70], "eye_lower": ["front", 0.68, 7.08],
+    "nose_tip":    ["front", 0.001, 6.86], "subnasale": ["front", 0.001, 6.71], "ala": ["front", 0.325, 6.80],
+    "mouth_corner":["front", 0.55, 6.50], "upper_lip": ["front", 0.001, 6.44], "lower_lip": ["front", 0.001, 6.33],
+    "chin":        ["front", 0.001, 6.20],
+    "ear_top":     ["side", 0.48, 7.60], "ear_lobe": ["side", 0.26, 6.60], "ear_back": ["side", 0.772, 7.16],
+    "thumb_tip":   ["bottom", 4.48, 0.88], "index_tip": ["bottom", 5.53, 0.55], "middle_tip": ["bottom", 5.82, 0.15],
+    "ring_tip":    ["bottom", 5.82, -0.19], "pinky_tip": ["bottom", 5.54, -0.61],
+    "toe1_tip":    ["front", 1.41, -9.18], "toe2_tip": ["front", 1.82, -9.24], "toe3_tip": ["front", 2.11, -9.24],
+    "toe4_tip":    ["front", 2.37, -9.23], "toe5_tip": ["front", 2.54, -9.22]
+  },
+  "meshy_m": {
+    "eye_outer":   ["front", 0.86, 7.83], "eye_inner": ["front", 0.24, 7.82],
+    "eye_upper":   ["front", 0.55, 8.00], "eye_lower": ["front", 0.55, 7.64],
+    "nose_tip":    ["front", 0.001, 7.33], "subnasale": ["front", 0.001, 7.15], "ala": ["front", 0.31, 7.30],
+    "mouth_corner":["front", 0.51, 7.00], "upper_lip": ["front", 0.001, 6.89], "lower_lip": ["front", 0.001, 6.78],
+    "chin":        ["front", 0.001, 6.45],
+    "ear_top":     ["side", 0.58, 8.08], "ear_lobe": ["side", 0.20, 7.20], "ear_back": ["side", 0.90, 7.70],
+    "thumb_tip":   ["bottom", 5.28, 1.28], "index_tip": ["bottom", 6.25, 1.15], "middle_tip": ["bottom", 6.55, 0.69],
+    "ring_tip":    ["bottom", 6.58, 0.29], "pinky_tip": ["bottom", 6.36, -0.06],
+    "toe1_tip":    ["front", 1.51, -9.22], "toe2_tip": ["front", 1.96, -9.24], "toe3_tip": ["front", 2.26, -9.24],
+    "toe4_tip":    ["front", 2.51, -9.23], "toe5_tip": ["front", 2.71, -9.22]
+  },
+  "joints": {
+    "_doc": "Meshy auto-rig joint -> hm08 joint helper group (left side mirrored automatically)",
+    "Hips": "joint-pelvis", "neck": "joint-neck", "Head": "joint-head",
+    "LeftArm": "joint-l-shoulder", "LeftForeArm": "joint-l-elbow", "LeftHand": "joint-l-hand",
+    "LeftUpLeg": "joint-l-upper-leg", "LeftLeg": "joint-l-knee", "LeftFoot": "joint-l-ankle"
+  }
+}
