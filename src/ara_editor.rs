@@ -242,20 +242,6 @@ pub(crate) fn native_ui(
                 if let (Some(i),Some(assets))=(mirror,assets.as_ref()) {if let Some(target)=recipe.custom_targets.get(i){let base=assets.0.base.arrays["positions"].f32().unwrap().chunks_exact(3).map(|p|[p[0],p[1],p[2]]).collect::<Vec<_>>();match crate::mpfb::mirror_target(&target.deltas,&base,0.01){Ok(deltas)=>recipe.custom_targets.push(CustomTarget{name:unique_target_name(recipe,&format!("{} mirrored",target.name)),weight:target.weight,deltas}),Err(e)=>state.status=e}}}
                 ui.separator();ui.label("MHM uses the preset path below with .mhm extension.");if ui.button("Import MHM").clicked(){import_mhm=true;}if ui.button("Export MHM").clicked(){export_mhm=true;}
             }else{
-                if state.category=="Body" {
-                    ui.collapsing("Breast shape and motion",|ui|{
-                        let b=&mut recipe.breasts;
-                        ui.add(egui::Slider::new(&mut b.volume,0.0..=2.5).text("Volume"));
-                        ui.add(egui::Slider::new(&mut b.projection,0.2..=2.5).text("Projection"));
-                        ui.add(egui::Slider::new(&mut b.lift,-1.0..=1.0).text("Lift"));
-                        ui.add(egui::Slider::new(&mut b.separation,-0.5..=0.5).text("Separation"));
-                        ui.checkbox(&mut b.dynamics,"Secondary motion");
-                        ui.add(egui::Slider::new(&mut b.motion_strength,0.0..=2.0).text("Motion strength"));
-                        ui.add(egui::Slider::new(&mut b.stiffness,2.0..=80.0).text("Stiffness"));
-                        ui.add(egui::Slider::new(&mut b.damping,0.1..=2.0).text("Damping"));
-                        if ui.button("Reset breast shape and motion").clicked(){*b=Default::default();}
-                    });
-                }
                 if state.category=="Clothing" {
                     ui.heading("Wardrobe profiles");
                     ui.add(egui::TextEdit::singleline(&mut state.wardrobe_path).hint_text("exports/wardrobe.json"));
@@ -379,7 +365,10 @@ pub(crate) fn native_ui(
                 let outfit_before=recipe.params["outfit"].clone();
                 let hair_before=recipe.params["hair"].clone();
                 let beard_before=recipe.params["facialHair"].clone();
-                for field in schema["fields"].as_array().unwrap(){if field["category"].as_str()!=Some(&state.category){continue;}draw_field(ui,&mut recipe.params,field);}
+                for field in schema["fields"].as_array().unwrap(){if field["category"].as_str()!=Some(&state.category){continue;}draw_field(ui,&mut recipe.params,field);
+                    // The detailed breast controls sit with the breast macros, under firmness.
+                    if field["id"]=="breastFirmness"{breast_shape_ui(ui,&mut recipe.breasts);}
+                }
                 if state.category=="Hair"&&recipe.params["hair"]!=hair_before{recipe.remove_custom_garment_slot(&GarmentSlot::Hair);}
                 if state.category=="Hair"&&recipe.params["facialHair"]!=beard_before{recipe.remove_custom_garment_slot(&GarmentSlot::Beard);}
                 if recipe.params["outfit"]!=outfit_before{
@@ -772,4 +761,21 @@ fn unique_target_name(recipe: &AraRecipe, proposed: &str) -> String {
         index += 1;
     }
     name
+}
+
+/// "Breast shape and motion": the native breast reshaping and secondary-motion settings.
+fn breast_shape_ui(ui: &mut egui::Ui, b: &mut crate::native_breast::BreastSettings) {
+    ui.collapsing("Breast shape and motion", |ui| {
+        ui.add(egui::Slider::new(&mut b.volume, 0.0..=2.5).text("Volume"));
+        ui.add(egui::Slider::new(&mut b.projection, 0.2..=2.5).text("Projection"));
+        ui.add(egui::Slider::new(&mut b.lift, -1.0..=1.0).text("Lift"));
+        ui.add(egui::Slider::new(&mut b.separation, -0.5..=0.5).text("Separation"));
+        ui.checkbox(&mut b.dynamics, "Secondary motion");
+        ui.add(egui::Slider::new(&mut b.motion_strength, 0.0..=2.0).text("Motion strength"));
+        ui.add(egui::Slider::new(&mut b.stiffness, 2.0..=80.0).text("Stiffness"));
+        ui.add(egui::Slider::new(&mut b.damping, 0.1..=2.0).text("Damping"));
+        if ui.button("Reset breast shape and motion").clicked() {
+            *b = Default::default();
+        }
+    });
 }
