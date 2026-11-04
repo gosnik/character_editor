@@ -7,24 +7,6 @@ published-format interoperability and custom-target workflows. Character
 construction, editing, rendering, animation and export run without Node, Python,
 Blender, a web server or an external generator.
 
-![Native character editor](docs/preview.png)
-
-## Run
-
-```sh
-cd character_editor
-cargo run --bin human-editor
-```
-
-The source includes the prepared native asset library. Initial Cargo builds need
-network access for Rust dependencies; the editor then works offline. The default
-asset directories are resolved from the crate location. The native window needs
-a display and a Bevy/wgpu-compatible GPU. Linux uses X11; X11/XKB development
-libraries and a working graphics driver must be available.
-
-See [CLI and wardrobe workflows](docs/CLI.md) for garment authoring, reusable
-outfits, sampled fit reports and animated exports.
-
 ## Cartoon mode
 
 Cartoon mode turns any character into a stylised, toy-like version of itself: a bigger
@@ -73,6 +55,24 @@ rebuilding after changing the fitting tools or the reference models in `referenc
 python3 tools/cartoon_hm08/build.py   # body, face and lashes (NumPy, SciPy)
 python3 tools/cartoon_hair/build.py   # hair shells (also Blender)
 ```
+
+## Run
+
+```sh
+cd character_editor
+cargo run --bin human-editor
+```
+
+The source includes the prepared native asset library. Initial Cargo builds need
+network access for Rust dependencies; the editor then works offline. The default
+asset directories are resolved from the crate location. The native window needs
+a display and a Bevy/wgpu-compatible GPU. Linux uses X11; X11/XKB development
+libraries and a working graphics driver must be available.
+
+See [CLI and wardrobe workflows](docs/CLI.md) for garment authoring, reusable
+outfits, sampled fit reports and animated exports.
+
+![Native character editor](docs/preview.png)
 
 ## Universal Animation Libraries
 
