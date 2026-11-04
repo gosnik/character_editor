@@ -158,6 +158,41 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 ///
 /// The exact neutral shape is a no-op, including for a male character. This
 /// matters because the normal target stack is authoritative at its defaults.
+/// The direction projection pushes a breast: its bone axis with the vertical tilt
+/// removed, straight out from the chest. Along the tilted bone (the cartoon nipple sits
+/// above the sternum anchor) scaling lifted and sheared the underside.
+fn outward(breast: &SourceBreast) -> Vec3 {
+    let axis = breast.tail - breast.head;
+    Vec3::new(axis.x, 0.0, axis.z).normalize_or_zero()
+}
+
+/// Distance of a point from the breast's outward line through its nipple.
+fn off_axis(breast: &SourceBreast, point: Vec3) -> f32 {
+    let out = outward(breast);
+    let d = point - breast.tail;
+    (d - out * d.dot(out)).length()
+}
+
+/// Radians the mound swings per unit of lift.
+const LIFT_ANGLE: f32 = 0.4;
+/// Share of its stand-out a point keeps when lift swings it towards the chest.
+const LIFT_KEEP: f32 = 0.6;
+
+/// `point` swung about the breast's lateral axis through its upper root (on the chest
+/// wall, the rim's radius above the nipple's foot) by `lift * LIFT_ANGLE`: negative
+/// lift droops the tip down towards the chest, positive tips it up.
+fn lift_point(breast: &SourceBreast, point: Vec3, wall: f32, radius: f32, lift: f32) -> Vec3 {
+    if lift == 0.0 {
+        return point;
+    }
+    let out = outward(breast);
+    let foot = breast.tail - out * ((breast.tail - breast.head).dot(out) - wall);
+    let pivot = foot + Vec3::Y * radius;
+    let side = Vec3::Y.cross(out).normalize_or_zero();
+    let turn = bevy::math::Quat::from_axis_angle(side, -lift * LIFT_ANGLE);
+    pivot + turn * (point - pivot)
+}
+
 /// Jacobi passes of the flat-chest membrane used below projection 1.
 const FLAT_ITERATIONS: usize = 1200;
 /// Smoothing passes over the flattening blend weight.
@@ -216,7 +251,9 @@ pub fn reshape(
     // Chest-wall level of each breast along its axis: projection scales how far each
     // point stands out from it, so the mound keeps its rounded shape.
     // The wall is the mean level of the breast's rim, where its skin weight fades out.
-    let (mut wall, mut rim) = ([0f32; 2], [0f32; 2]);
+    // The rim's mean distance from the axis through the nipple sets the footprint
+    // radius of the projection dome.
+    let (mut wall, mut rim, mut radius) = ([0f32; 2], [0f32; 2], [0f32; 2]);
     for (vertex, point) in source.iter().enumerate() {
         let (start, end) = (offsets[vertex] as usize, offsets[vertex + 1] as usize);
         for (b, breast) in breasts.iter().enumerate() {
@@ -224,16 +261,21 @@ pub fn reshape(
                 .filter(|&entry| bones[entry] == breast.index)
                 .map(|entry| values[entry].max(0.0))
                 .sum();
-            let axis = (breast.tail - breast.head).normalize_or_zero();
-            let along = (Vec3::from(*point) - breast.head).dot(axis);
+            let along = (Vec3::from(*point) - breast.head).dot(outward(breast));
             if weight > RIM_WEIGHT.0 && weight < RIM_WEIGHT.1 && along > 0.0 {
                 wall[b] += along;
                 rim[b] += 1.0;
+                radius[b] += off_axis(breast, Vec3::from(*point));
             }
         }
     }
     for b in 0..2 {
         wall[b] = if rim[b] > 0.0 { wall[b] / rim[b] } else { 0.0 };
+        radius[b] = if rim[b] > 0.0 {
+            radius[b] / rim[b]
+        } else {
+            1.0
+        };
     }
     for (vertex, point) in source.iter().enumerate() {
         let start = offsets[vertex] as usize;
@@ -285,19 +327,42 @@ pub fn reshape(
                 * influence;
             // Above 1 the mound's stand-out from its rim level is scaled; below 1 the part
             // in front of the rim (not the armpit side) blends towards a flat chest.
-            let standout = ((Vec3::from(*point) - breast.head).dot(forward) - wall[b]).max(0.0);
+            let out = outward(breast);
+            let standout = ((Vec3::from(*point) - breast.head).dot(out) - wall[b]).max(0.0);
             if standout > 0.0 {
                 mound[vertex] = mound[vertex].max(member * female);
             }
-            let projection = if settings.projection > 1.0 {
-                forward * ((settings.projection - 1.0) * standout * projected)
+            // Above 1 the front of the mound is pushed out as a hemispherical dome: nearly
+            // the nipple's full push across the breast, turning down only towards the
+            // rim's distance from the centre line, so it projects as a rounded bulb with
+            // a full underside instead of stretching into a cone.
+            let projection = if settings.projection > 1.0 && standout > 0.0 {
+                let r = (off_axis(breast, Vec3::from(*point)) / radius[b]).min(1.0);
+                let dome = (1.0 - r * r).max(0.0).sqrt();
+                let tip = ((breast.tail - breast.head).dot(out) - wall[b]).max(0.0);
+                out * ((settings.projection - 1.0) * tip * dome * projected)
             } else {
                 Vec3::ZERO
             };
-            let lift = Vec3::Y * (settings.lift * length * 0.72);
+            // Lift swings the front of the mound about its upper root (a droop down, a
+            // perk up) instead of sliding it into the belly or collarbone.
+            let mut lifted = lift_point(
+                breast,
+                Vec3::from(*point),
+                wall[b],
+                radius[b],
+                settings.lift,
+            );
+            // A drooping underside may not fold back into the chest wall.
+            let lifted_out = (lifted - breast.head).dot(out) - wall[b];
+            if lifted_out < LIFT_KEEP * standout {
+                lifted += out * (LIFT_KEEP * standout - lifted_out);
+            }
+            let tip_out = ((breast.tail - breast.head).dot(out) - wall[b]).max(1e-4);
+            let front = smoothstep(0.0, 0.6 * tip_out, standout);
+            let lift = (lifted - Vec3::from(*point)) * member * front * female;
             let separation = Vec3::X * (breast.side * settings.separation * length * 0.70);
-            let changed =
-                Vec3::from(*point) + volume + projection + (lift + separation) * influence;
+            let changed = Vec3::from(*point) + volume + projection + lift + separation * influence;
             coords[vertex] = changed.to_array();
         }
     }
@@ -313,11 +378,11 @@ pub fn reshape(
         let axis = breast.tail - breast.head;
         let length = axis.length();
         let forward = axis / length;
-        let standout = (length - wall[b]).max(0.0);
-        let delta = forward
-            * ((settings.volume - 1.0) * length * 0.32
-                + (settings.projection - 1.0).max(0.0) * standout)
-            + Vec3::Y * (settings.lift * length * 0.72)
+        let out = outward(breast);
+        let standout = ((breast.tail - breast.head).dot(out) - wall[b]).max(0.0);
+        let delta = forward * ((settings.volume - 1.0) * length * 0.32)
+            + out * ((settings.projection - 1.0).max(0.0) * standout)
+            + (lift_point(breast, breast.tail, wall[b], radius[b], settings.lift) - breast.tail)
             + Vec3::X * (breast.side * settings.separation * length * 0.70);
         for vertex in joint_vertices(&lib.base.meta, &breast.tail_name)? {
             if reshaped.get(vertex).copied().unwrap_or(false) {
@@ -613,7 +678,11 @@ pub fn nipple_relief(
     projection: f32,
     base: f32,
 ) -> Result<(), String> {
-    let female = if gender.is_finite() { (1.0 - gender).clamp(0.0, 1.0) } else { 0.0 };
+    let female = if gender.is_finite() {
+        (1.0 - gender).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     if female == 0.0 {
         return Ok(());
     }
@@ -627,7 +696,7 @@ pub fn nipple_relief(
     let areola_top = AREOLA_RADII.0 * (1.0 - below);
     let breasts = source_breasts(lib, coords)?;
     for breast in &breasts {
-        let forward = (breast.tail - breast.head).normalize_or_zero();
+        let forward = outward(breast);
         for point in coords.iter_mut() {
             let d = Vec3::from(*point).distance(breast.tail);
             if d >= AREOLA_RADII.1 {

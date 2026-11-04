@@ -326,16 +326,26 @@ fn custom_target_axis_and_recipe_persistence() {
 #[test]
 fn breast_projection_moves_the_nipple_with_its_areola() {
     let lib = library();
-    let base: Vec<[f32; 3]> = lib.base.arrays["positions"].f32().unwrap().chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    let base: Vec<[f32; 3]> = lib.base.arrays["positions"]
+        .f32()
+        .unwrap()
+        .chunks_exact(3)
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
     let faces = lib.base.arrays["faceVerts"].u32().unwrap();
-    let tip = lib.base.meta["joints"]["breast.L____tail"][0].as_u64().unwrap() as u32;
+    let tip = lib.base.meta["joints"]["breast.L____tail"][0]
+        .as_u64()
+        .unwrap() as u32;
     let mut ring = std::collections::BTreeSet::new();
     for q in faces.chunks_exact(4).filter(|q| q.contains(&tip)) {
         ring.extend(q.iter().copied().filter(|&v| v != tip));
     }
     for projection in [1.25, 2.0] {
         let mut coords = base.clone();
-        let settings = human_editor::native_breast::BreastSettings { projection, ..Default::default() };
+        let settings = human_editor::native_breast::BreastSettings {
+            projection,
+            ..Default::default()
+        };
         human_editor::native_breast::reshape(&lib, &mut coords, 0.0, &settings).unwrap();
         let moved = |v: u32| {
             let (a, b) = (base[v as usize], coords[v as usize]);
@@ -343,30 +353,60 @@ fn breast_projection_moves_the_nipple_with_its_areola() {
         };
         let neighbours = ring.iter().map(|&v| moved(v)).fold(0., f32::max);
         // The tip rides its areola: no lone spike ahead of the surrounding skin.
-        assert!(moved(tip) > 0. && moved(tip) <= neighbours * 1.15, "projection {projection}: tip {} vs ring {neighbours}", moved(tip));
+        assert!(
+            moved(tip) > 0. && moved(tip) <= neighbours * 1.15,
+            "projection {projection}: tip {} vs ring {neighbours}",
+            moved(tip)
+        );
     }
 }
 
 #[test]
 fn nipple_relief_matches_the_requested_heights() {
     let lib = library();
-    let base: Vec<[f32; 3]> = lib.base.arrays["positions"].f32().unwrap().chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
-    let tip = lib.base.meta["joints"]["breast.L____tail"][0].as_u64().unwrap() as usize;
+    let base: Vec<[f32; 3]> = lib.base.arrays["positions"]
+        .f32()
+        .unwrap()
+        .chunks_exact(3)
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let tip = lib.base.meta["joints"]["breast.L____tail"][0]
+        .as_u64()
+        .unwrap() as usize;
     let lifted = |projection: f32, cartoon: f32| {
         let mut c = base.clone();
         human_editor::native_breast::nipple_relief(&lib, &mut c, 0.0, projection, cartoon).unwrap();
         // decimetres -> millimetres
-        // signed along the outward breast axis, decimetres -> millimetres
-        let head = lib.base.meta["joints"]["breast.L____head"][0].as_u64().unwrap() as usize;
-        let axis: Vec<f32> = (0..3).map(|k| base[tip][k] - base[head][k]).collect();
+        // signed, decimetres -> millimetres
+        let head = lib.base.meta["joints"]["breast.L____head"][0]
+            .as_u64()
+            .unwrap() as usize;
+        // the relief pushes straight out from the chest: the bone axis without its tilt
+        let mut axis: Vec<f32> = (0..3).map(|k| base[tip][k] - base[head][k]).collect();
+        axis[1] = 0.;
         let len = axis.iter().map(|a| a * a).sum::<f32>().sqrt();
-        (0..3).map(|k| (c[tip][k] - base[tip][k]) * axis[k] / len).sum::<f32>() * 100.
+        (0..3)
+            .map(|k| (c[tip][k] - base[tip][k]) * axis[k] / len)
+            .sum::<f32>()
+            * 100.
     };
     // Cartoon: 1 mm areola + 3 mm nipple at projection 1, 5 + 12 mm at 2; at the
     // minimum the areola keeps 1 mm (rounded) and the nipple is 2 mm inverted.
-    assert!((lifted(1.0, 1.0) - 4.0).abs() < 0.05, "{}", lifted(1.0, 1.0));
-    assert!((lifted(2.0, 1.0) - 17.0).abs() < 0.05, "{}", lifted(2.0, 1.0));
-    assert!((lifted(0.2, 1.0) - (1.0 - 2.0)).abs() < 0.05, "{}", lifted(0.2, 1.0));
+    assert!(
+        (lifted(1.0, 1.0) - 4.0).abs() < 0.05,
+        "{}",
+        lifted(1.0, 1.0)
+    );
+    assert!(
+        (lifted(2.0, 1.0) - 17.0).abs() < 0.05,
+        "{}",
+        lifted(2.0, 1.0)
+    );
+    assert!(
+        (lifted(0.2, 1.0) - (1.0 - 2.0)).abs() < 0.05,
+        "{}",
+        lifted(0.2, 1.0)
+    );
     // Realistic MakeHuman keeps its own nipples at 1.
     assert_eq!(lifted(1.0, 0.0), 0.0);
 }
@@ -375,8 +415,16 @@ fn nipple_relief_matches_the_requested_heights() {
 fn cartoon_muscle_follows_the_superhuman_references() {
     let lib = library();
     let info = &lib.cartoon_offsets().unwrap().meta["cartoon"];
-    for key in ["female_muscle", "male_muscle", "female_muscle_chest", "male_muscle_chest"] {
-        assert!(info[key].is_string(), "{key} correction missing from cartoon.pack");
+    for key in [
+        "female_muscle",
+        "male_muscle",
+        "female_muscle_chest",
+        "male_muscle_chest",
+    ] {
+        assert!(
+            info[key].is_string(),
+            "{key} correction missing from cartoon.pack"
+        );
     }
     let body = |gender: f64, muscle: f64, cartoon: bool| {
         let mut r = AraRecipe::default();
@@ -385,17 +433,29 @@ fn cartoon_muscle_follows_the_superhuman_references() {
         r.params["breastSize"] = json!(1.0);
         r.cartoon.enabled = cartoon;
         let c = NativeCharacter::build(&lib, &r).unwrap();
-        c.parts.iter().find(|p| p.name == "Body").unwrap().positions.clone()
+        c.parts
+            .iter()
+            .find(|p| p.name == "Body")
+            .unwrap()
+            .positions
+            .clone()
     };
     let moved = |a: &[[f32; 3]], b: &[[f32; 3]]| {
-        a.iter().zip(b).map(|(x, y)| (0..3).map(|k| (x[k] - y[k]).powi(2)).sum::<f32>().sqrt()).sum::<f32>() / a.len() as f32
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (0..3).map(|k| (x[k] - y[k]).powi(2)).sum::<f32>().sqrt())
+            .sum::<f32>()
+            / a.len() as f32
     };
     for gender in [0.0, 1.0] {
         // Muscle moves the cartoon body further than the realistic one: the Superhuman
         // correction adds to MakeHuman's own muscle targets.
         let real = moved(&body(gender, 0.5, false), &body(gender, 1.0, false));
         let cartoon = moved(&body(gender, 0.5, true), &body(gender, 1.0, true));
-        assert!(cartoon > real * 1.3, "gender {gender}: cartoon muscle {cartoon} vs realistic {real}");
+        assert!(
+            cartoon > real * 1.3,
+            "gender {gender}: cartoon muscle {cartoon} vs realistic {real}"
+        );
     }
 }
 
@@ -407,16 +467,39 @@ fn cartoon_lashes_are_a_lid_line_that_blinks() {
     recipe.params["faceShapes"] = json!(true);
     recipe.cartoon.enabled = true;
     let c = NativeCharacter::build(&lib, &recipe).unwrap();
-    let lashes = c.parts.iter().find(|p| p.name == "Eyelashes").expect("lashes");
-    assert_eq!(lashes.material["alpha"], json!("opaque"), "solid lash line, not strand cards");
-    let blink = c.face_names.iter().position(|n| n == "eyeBlinkLeft").expect("blink shape");
+    let lashes = c
+        .parts
+        .iter()
+        .find(|p| p.name == "Eyelashes")
+        .expect("lashes");
+    assert_eq!(
+        lashes.material["alpha"],
+        json!("opaque"),
+        "solid lash line, not strand cards"
+    );
+    let blink = c
+        .face_names
+        .iter()
+        .position(|n| n == "eyeBlinkLeft")
+        .expect("blink shape");
     // Every lash vertex rides one lid-margin vertex: the left ribbon's middle (not its
     // corners) closes with the left lid.
-    let moving = lashes.refs.iter().zip(&lashes.ref_weights).filter(|(r, w)| {
-        w[0] == 1. && c.face_deltas[blink].get(r[0] as usize).is_some_and(|d| d.iter().any(|x| x.abs() > 1e-4))
-    });
+    let moving = lashes
+        .refs
+        .iter()
+        .zip(&lashes.ref_weights)
+        .filter(|(r, w)| {
+            w[0] == 1.
+                && c.face_deltas[blink]
+                    .get(r[0] as usize)
+                    .is_some_and(|d| d.iter().any(|x| x.abs() > 1e-4))
+        });
     let moving = moving.count();
-    assert!(moving * 5 >= lashes.refs.len(), "lashes must follow the blinking lid: {moving}/{}", lashes.refs.len());
+    assert!(
+        moving * 5 >= lashes.refs.len(),
+        "lashes must follow the blinking lid: {moving}/{}",
+        lashes.refs.len()
+    );
 }
 
 #[test]
@@ -424,11 +507,24 @@ fn cartoon_arms_spread_clear_of_the_wider_torso() {
     let lib = library();
     let mut recipe = AraRecipe::default();
     recipe.params["gender"] = json!(0.0);
-    let spread = |r: &AraRecipe| NativeCharacter::build(&lib, r).unwrap().rig.unwrap().arm_spread();
-    assert_eq!(spread(&recipe), 0., "realistic bodies keep the clips' arm angles");
+    let spread = |r: &AraRecipe| {
+        NativeCharacter::build(&lib, r)
+            .unwrap()
+            .rig
+            .unwrap()
+            .arm_spread()
+    };
+    assert_eq!(
+        spread(&recipe),
+        0.,
+        "realistic bodies keep the clips' arm angles"
+    );
     recipe.cartoon.enabled = true;
     let cartoon = spread(&recipe);
-    assert!(cartoon > 0.05 && cartoon < 0.35, "cartoon hips need a moderate spread, got {cartoon}");
+    assert!(
+        cartoon > 0.05 && cartoon < 0.35,
+        "cartoon hips need a moderate spread, got {cartoon}"
+    );
 }
 
 #[test]
@@ -439,11 +535,19 @@ fn cartoon_hm08_offsets_keep_makehuman_controls() {
     recipe.cartoon.enabled = true;
     let cartoon = NativeCharacter::build(&lib, &recipe).unwrap();
     let names = |c: &NativeCharacter| c.parts.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
-    assert_eq!(names(&natural), names(&cartoon), "cartoon keeps every MakeHuman part");
+    assert_eq!(
+        names(&natural),
+        names(&cartoon),
+        "cartoon keeps every MakeHuman part"
+    );
     for (a, b) in natural.parts.iter().zip(&cartoon.parts) {
         if a.name == "Hair" {
             // Cartoon mode swaps the strand cards for the solid shell (tools/cartoon_hair).
-            assert_eq!(b.material["cartoonShell"], json!(true), "cartoon hair uses the shell");
+            assert_eq!(
+                b.material["cartoonShell"],
+                json!(true),
+                "cartoon hair uses the shell"
+            );
             assert_ne!(a.indices, b.indices);
             continue;
         }
@@ -456,27 +560,48 @@ fn cartoon_hm08_offsets_keep_makehuman_controls() {
         assert_ne!(a.positions, b.positions, "{} was not reshaped", a.name);
     }
     assert_eq!(natural.face_names, cartoon.face_names);
-    assert_ne!(natural.face_deltas, cartoon.face_deltas, "expressions must be resized");
+    assert_ne!(
+        natural.face_deltas, cartoon.face_deltas,
+        "expressions must be resized"
+    );
     let bones = |c: &NativeCharacter| c.rig.as_ref().unwrap().bones.len();
     assert_eq!(bones(&natural), bones(&cartoon));
     // All surfaces: default clothing hides parts of the body mesh.
     let built = |r: &AraRecipe| {
-        NativeCharacter::build(&lib, r).unwrap().parts.iter().flat_map(|p| p.positions.clone()).collect::<Vec<_>>()
+        NativeCharacter::build(&lib, r)
+            .unwrap()
+            .parts
+            .iter()
+            .flat_map(|p| p.positions.clone())
+            .collect::<Vec<_>>()
     };
     // Amount 0 is exactly MakeHuman.
     recipe.cartoon.strength = 0.;
-    let all = |c: &NativeCharacter| c.parts.iter().flat_map(|p| p.positions.clone()).collect::<Vec<_>>();
+    let all = |c: &NativeCharacter| {
+        c.parts
+            .iter()
+            .flat_map(|p| p.positions.clone())
+            .collect::<Vec<_>>()
+    };
     assert_eq!(built(&recipe), all(&natural));
     recipe.cartoon.strength = 1.;
     // MakeHuman macros keep their range on top of the cartoon shape.
-    for (field, lo, hi) in [("gender", 0.0, 1.0), ("breastSize", 0.0, 1.0), ("age", 0.21, 1.0)] {
+    for (field, lo, hi) in [
+        ("gender", 0.0, 1.0),
+        ("breastSize", 0.0, 1.0),
+        ("age", 0.21, 1.0),
+    ] {
         let mut a = recipe.clone();
         a.params["gender"] = json!(0.0);
         let mut b = a.clone();
         a.params[field] = json!(lo);
         b.params[field] = json!(hi);
         let (pa, pb) = (built(&a), built(&b));
-        let moved = pa.iter().zip(&pb).map(|(x, y)| (0..3).map(|k| (x[k] - y[k]).abs()).fold(0., f32::max)).fold(0., f32::max);
+        let moved = pa
+            .iter()
+            .zip(&pb)
+            .map(|(x, y)| (0..3).map(|k| (x[k] - y[k]).abs()).fold(0., f32::max))
+            .fold(0., f32::max);
         assert!(moved > 0.01, "{field} has no effect on the cartoon body");
     }
     // A cartoon child stays a sane offset from the realistic child (no runaway deltas).
@@ -488,8 +613,12 @@ fn cartoon_hm08_offsets_keep_makehuman_controls() {
     let cartoon_child = built(&child);
     child.cartoon.enabled = false;
     let real_child = built(&child);
-    let worst = cartoon_child.iter().zip(&real_child).map(|(a, b)| {
-        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
-    }).fold(0., f32::max);
+    let worst = cartoon_child
+        .iter()
+        .zip(&real_child)
+        .map(|(a, b)| {
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        })
+        .fold(0., f32::max);
     assert!(worst.is_finite() && worst < 0.5, "child offset {worst} m");
 }
