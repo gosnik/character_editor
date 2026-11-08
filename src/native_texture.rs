@@ -212,6 +212,13 @@ pub fn soften_diffuse(image: &mut image::RgbaImage, strength: f32) {
 /// Cartoon-mode texture pass, chosen by the material's `cartoonKind` (set in
 /// `native_cartoon::soften_material`) and scaled by its `cartoonDetail`.
 pub fn cartoon_texture(image: &mut image::RgbaImage, material: &Value) {
+    // Imported cartoon garments can contain tiny UV islands (buckles, seams,
+    // colour blocking) where the standard diffuse blur would destroy authored
+    // detail.  This is deliberately an explicit boolean opt-in: malformed or
+    // legacy values retain the established cartoon pass.
+    if material["preserveCartoonTexture"].as_bool() == Some(true) {
+        return;
+    }
     let strength = material["cartoonDetail"].as_f64().unwrap_or(0.) as f32;
     let strength = if strength.is_finite() {
         strength.clamp(0., 1.)
@@ -409,5 +416,37 @@ mod cartoon_texture_tests {
         cartoon_texture(&mut brow, &material);
         assert!(brow.get_pixel(126, 128)[3] > 200 && brow.get_pixel(127, 128)[3] > 200);
         assert_eq!(brow.get_pixel(128, 8)[3], 0);
+    }
+
+    #[test]
+    fn preserve_cartoon_texture_keeps_authored_atlas_bytes_only_for_literal_true() {
+        let atlas = image::RgbaImage::from_fn(16, 16, |x, y| {
+            image::Rgba([
+                if (x + y) % 2 == 0 { 20 } else { 230 },
+                if x % 2 == 0 { 220 } else { 30 },
+                if y % 2 == 0 { 40 } else { 210 },
+                (x * 16 + y) as u8,
+            ])
+        });
+        let preserved_material = serde_json::json!({
+            "cartoonDetail": 1.0,
+            "preserveCartoonTexture": true,
+        });
+        let mut preserved = atlas.clone();
+        cartoon_texture(&mut preserved, &preserved_material);
+        assert_eq!(preserved, atlas);
+
+        for material in [
+            serde_json::json!({"cartoonDetail": 1.0}),
+            serde_json::json!({"cartoonDetail": 1.0, "preserveCartoonTexture": false}),
+            serde_json::json!({"cartoonDetail": 1.0, "preserveCartoonTexture": "true"}),
+        ] {
+            let mut softened = atlas.clone();
+            cartoon_texture(&mut softened, &material);
+            assert_ne!(softened, atlas);
+            for (pixel, original) in softened.pixels().zip(atlas.pixels()) {
+                assert_eq!(pixel[3], original[3]);
+            }
+        }
     }
 }

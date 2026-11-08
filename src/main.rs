@@ -32,14 +32,16 @@ fn main() {
         );
         std::process::exit(1)
     });
-    let native = human_editor::native_runtime::NativeAssets::load(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/assets/native"
-    ))
-    .unwrap_or_else(|e| {
-        eprintln!("Native assets: {e}");
-        std::process::exit(1)
-    });
+    let native_root = std::env::var_os("HUMAN_EDITOR_ASSETS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/native")
+        });
+    let native =
+        human_editor::native_runtime::NativeAssets::load(&native_root).unwrap_or_else(|e| {
+            eprintln!("Native assets: {e}");
+            std::process::exit(1)
+        });
     App::new()
         .insert_resource(native)
         .insert_resource(library)
@@ -70,6 +72,7 @@ fn main() {
 
 // Opt-in native rendering smoke test; normal editor sessions have no frame limit.
 fn smoke_capture(
+    native_assets: Res<human_editor::native_runtime::NativeAssets>,
     errors: Query<&human_editor::CharacterBuildError>,
     mut instances: Query<&mut human_editor::native_runtime::NativeInstance>,
     mut frames: Local<u32>,
@@ -94,7 +97,7 @@ fn smoke_capture(
             let recipe = if let Ok(recipe_path) = std::env::var("HUMAN_EDITOR_SMOKE_RECIPE") {
                 human_editor::cli_io::load(
                     std::path::Path::new(&recipe_path),
-                    std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/native")),
+                    &native_assets.0.root,
                 )
                 .expect("smoke recipe must load")
             } else if let Some(name) = preset {
@@ -130,7 +133,11 @@ fn smoke_capture(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.9);
-            view.set_view(yaw, 0.05, distance, focus);
+            let pitch = std::env::var("HUMAN_EDITOR_SMOKE_PITCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.05);
+            view.set_view(yaw, pitch, distance, focus);
             *configured = true;
         }
         return;

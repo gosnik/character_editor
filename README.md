@@ -142,6 +142,12 @@ Use Human Studio JSON for complete editable projects.
 
 ## Custom wardrobe library
 
+For the imported cartoon items, enable **Cartoon mode**, then select clothing
+under **Clothing → Custom wardrobe** and hairstyles or beards under
+**Hair → Custom hair & beards**. Each slot can be selected independently to mix
+items from different source characters. Restart the editor after installing or
+updating catalog files; its catalog is loaded at startup.
+
 Place imported custom-garment JSON definitions in
 `assets/native/custom_garments/`. The native asset loader validates every
 `*.json` definition once when it starts, including any `map`, `diffuse`,

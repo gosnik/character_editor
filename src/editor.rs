@@ -123,8 +123,13 @@ fn setup(
             ..default()
         })),
         RigidBody::Static,
-        Collider::cuboid(200., 0.1, 200.),
-        Transform::from_xyz(0., -0.05, 0.),
+        // The plane depicts the collider's top surface, not its centre.
+        Collider::compound(vec![(
+            Vec3::new(0., -0.05, 0.),
+            Quat::IDENTITY,
+            Collider::cuboid(200., 0.1, 200.),
+        )]),
+        Transform::default(),
     ));
     commands.spawn((
         DirectionalLight {

@@ -277,6 +277,10 @@ enum WardrobeCommand {
         slot: String,
         #[arg(long,value_parser=["m","dm"],default_value="m")]
         units: String,
+        /// Bind each nearby garment vertex to a local native body triangle.
+        /// Keeps source geometry and UVs unchanged while avoiding cross-surface anchors.
+        #[arg(long, visible_alias = "surface-binding")]
+        surface_bind: bool,
         #[arg(long, default_value = "#ffffff")]
         color: String,
         /// Optional image copied into the selected native asset library
@@ -301,6 +305,9 @@ enum WardrobeCommand {
         report: Option<PathBuf>,
         #[arg(long)]
         export_dir: Option<PathBuf>,
+        /// Include up to 256 exact contacting triangles per pose for this part (for example custom:coat)
+        #[arg(long)]
+        contact_details: Option<String>,
         /// Return failure if any fit warning is reported
         #[arg(long)]
         strict: bool,
@@ -1109,6 +1116,7 @@ fn wardrobe_command(cli: &Cli, command: &WardrobeCommand) -> Result<(), String> 
             id,
             slot,
             units,
+            surface_bind,
             color,
             texture,
             hide_faces,
@@ -1118,7 +1126,14 @@ fn wardrobe_command(cli: &Cli, command: &WardrobeCommand) -> Result<(), String> 
             }
             let text = String::from_utf8(read_bounded(input)?).map_err(|_| "OBJ is not UTF-8")?;
             let lib = NativeLibrary::load(&cli.assets)?;
-            let mut garment = crate::wardrobe_assets::import_obj(&lib, &text, id, slot, units)?;
+            let mut garment = crate::wardrobe_assets::import_obj_with_binding(
+                &lib,
+                &text,
+                id,
+                slot,
+                units,
+                *surface_bind,
+            )?;
             garment.material["color"] = json!(color);
             if matches!(slot.as_str(), "hair" | "beard") {
                 // Facial/scalp hair textures carry real alpha at strand edges
@@ -1199,6 +1214,7 @@ fn wardrobe_command(cli: &Cli, command: &WardrobeCommand) -> Result<(), String> 
             samples,
             report,
             export_dir,
+            contact_details,
             strict,
         } => {
             let wardrobe = WardrobeProfile::load(profile)?;
@@ -1230,8 +1246,14 @@ fn wardrobe_command(cli: &Cli, command: &WardrobeCommand) -> Result<(), String> 
                 bases.push((name, source_recipe(&source, &cli.assets)?));
             }
             let lib = NativeLibrary::load(&cli.assets)?;
-            let mut result =
-                crate::wardrobe::test_profile(&lib, &wardrobe, &bases, clip, *samples)?;
+            let mut result = crate::wardrobe::test_profile_with_contact_details(
+                &lib,
+                &wardrobe,
+                &bases,
+                clip,
+                *samples,
+                contact_details.as_deref(),
+            )?;
             if let Some(directory) = export_dir {
                 let mut exports = vec![];
                 for (index, (name, base)) in bases.iter().enumerate() {

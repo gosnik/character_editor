@@ -3,7 +3,11 @@
 //! The baker records each procedural mesh in its neutral body pose plus three
 //! body references per vertex.  Reconstructing from those references keeps
 //! garments attached to every MakeHuman morph without invoking Node or Ara.
-use crate::{native_assets::NativeLibrary, native_character::NativePart};
+use crate::{
+    native_assets::NativeLibrary,
+    native_character::{NativePart, SkinWeightSourceTopology},
+    native_fit::BodyDeformation,
+};
 use bevy::prelude::{Mat3, Vec3};
 use flate2::read::GzDecoder;
 use serde::Deserialize;
@@ -22,6 +26,65 @@ pub struct Wardrobe {
     /// Occluded quad indices in the original body topology, with an intact skin rim.
     pub hidden_faces: Vec<u32>,
     pub hides_hair: bool,
+}
+
+/// Transports authored stock-clothing offsets through a cartoon body field.
+/// Invalid legacy bindings retain their established static-offset result.
+fn adapt_cartoon_clothing_offsets(
+    parts: &mut [NativePart],
+    adaptive_clothing: &[bool],
+    coords: &[[f32; 3]],
+    deformation: &BodyDeformation,
+) -> usize {
+    let mut adapted = 0;
+    for (part, &is_clothing) in parts.iter_mut().zip(adaptive_clothing) {
+        if !is_clothing || part.rigid_joint.is_some() {
+            continue;
+        }
+        for index in 0..part.positions.len() {
+            let Some(refs) = part.refs.get(index).copied() else {
+                continue;
+            };
+            let Some(weights) = part.ref_weights.get(index).copied() else {
+                continue;
+            };
+            // Legacy proxy fitting accepts unusual bindings. Do not reject a
+            // valid legacy garment merely because adaptive transport cannot
+            // establish a stable local frame for it.
+            if !weights
+                .iter()
+                .all(|weight| weight.is_finite() && *weight >= 0.)
+            {
+                continue;
+            }
+            let mut anchor = Vec3::ZERO;
+            let mut valid = true;
+            for (&reference, &weight) in refs.iter().zip(weights.iter()) {
+                let Some(point) = coords.get(reference as usize) else {
+                    valid = false;
+                    break;
+                };
+                anchor += Vec3::from(*point) * weight;
+            }
+            if !valid || !anchor.is_finite() {
+                continue;
+            }
+            let offset = Vec3::from(part.positions[index]) - anchor;
+            let Ok(offset) = deformation.transform_offset(refs, weights, offset) else {
+                continue;
+            };
+            let position = anchor + offset;
+            if position.is_finite() {
+                part.positions[index] = position.to_array();
+                adapted += 1;
+            }
+        }
+    }
+    adapted
+}
+
+fn is_adaptive_stock_clothing(id: &str, slot: Option<&str>) -> bool {
+    id != "briefs" && matches!(slot, Some("top" | "jacket" | "bottom" | "feet"))
 }
 
 #[derive(Deserialize)]
@@ -43,6 +106,7 @@ struct Template {
     weights: Vec<[f32; 3]>,
     #[serde(default)]
     rigid_joint: Option<String>,
+    skin_weight_source_topology: Option<SkinWeightSourceTopology>,
     material: Value,
 }
 
@@ -364,6 +428,7 @@ fn instantiate(
         refs: t.refs,
         ref_weights: t.weights,
         rigid_joint: t.rigid_joint,
+        skin_weight_source_topology: None,
         material: style(params, id, material),
     }
 }
@@ -487,6 +552,7 @@ pub(crate) fn tattoo_part(
         refs: vec![],
         ref_weights: vec![],
         rigid_joint: None,
+        skin_weight_source_topology: None,
         material: json!({"name":id,"color":ink,"roughness":0.75,"alpha":"blend","doubleSided":false,"map":format!("textures/look_{id}.png")}),
     };
     for f in selected {
@@ -528,6 +594,7 @@ fn bicycle(coords: &[[f32; 3]]) -> NativePart {
         refs: vec![],
         ref_weights: vec![],
         rigid_joint: None,
+        skin_weight_source_topology: None,
         material: json!({"name":"Bicycle","color":"#242b35","roughness":0.5,"metalness":0.65,"doubleSided":true}),
     };
     for center_z in [-4.6, 5.1] {
@@ -620,6 +687,15 @@ pub fn build_wardrobe(
     lib: &NativeLibrary,
     coords: &[[f32; 3]],
     params: &Value,
+) -> Result<Wardrobe, String> {
+    build_wardrobe_with_deformation(lib, coords, params, None)
+}
+
+pub fn build_wardrobe_with_deformation(
+    lib: &NativeLibrary,
+    coords: &[[f32; 3]],
+    params: &Value,
+    deformation: Option<&BodyDeformation>,
 ) -> Result<Wardrobe, String> {
     let bake = baked(lib)?;
     let raw = lib
@@ -741,6 +817,7 @@ pub fn build_wardrobe(
         .collect();
     // Clothing layer of each part, for `separate_layers`.
     let mut layers = vec![];
+    let mut adaptive_clothing = vec![];
     for id in chosen {
         if let Some(parts) = bake.parts.get(&id) {
             let layer = match slots.get(id.as_str()).copied() {
@@ -749,7 +826,9 @@ pub fn build_wardrobe(
                 Some("jacket") => 3,
                 _ => 0,
             };
+            let adaptive = is_adaptive_stock_clothing(id.as_str(), slots.get(id.as_str()).copied());
             layers.extend(std::iter::repeat_n(layer, parts.len()));
+            adaptive_clothing.extend(std::iter::repeat_n(adaptive, parts.len()));
             out.parts.extend(parts.iter().cloned().map(|t| {
                 let transform =
                     rigid_transform(&lib.base.meta, &neutral, coords, t.rigid_joint.as_deref());
@@ -771,6 +850,9 @@ pub fn build_wardrobe(
             id.as_str(),
             "keffiyeh" | "gele" | "helmet" | "beret" | "cowboy_hat" | "baseball_cap"
         );
+    }
+    if let Some(deformation) = deformation {
+        adapt_cartoon_clothing_offsets(&mut out.parts, &adaptive_clothing, coords, deformation);
     }
     separate_layers(&mut out.parts, &layers, coords, &current_normals, faces);
     if s(params, "facialHair").is_some_and(|s| s == "stubble" || s == "mustache_stubble") {
@@ -913,5 +995,91 @@ mod tests {
             direct_refs > 100,
             "fixture must exercise proxy direct references"
         );
+    }
+
+    fn test_part(position: [f32; 3], weights: [f32; 3]) -> NativePart {
+        NativePart {
+            name: "test".into(),
+            positions: vec![position],
+            indices: vec![],
+            uvs: vec![],
+            refs: vec![[0, 1, 2]],
+            ref_weights: vec![weights],
+            rigid_joint: None,
+            skin_weight_source_topology: None,
+            material: json!({}),
+        }
+    }
+
+    #[test]
+    fn cartoon_clothing_transports_offsets_but_skips_non_clothing_parts() {
+        let neutral = vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+        let current = vec![[0., 0., 0.], [2., 0., 0.], [0., 3., 0.]];
+        let field = BodyDeformation::new(&neutral, &current, &[0, 1, 2, 2], &[1, 1, 1]).unwrap();
+        let offset = Vec3::new(0.5, 0.1, 0.);
+        let expected = field
+            .transform_offset([0, 1, 2], [1., 0., 0.], offset)
+            .unwrap();
+        let mut parts = vec![
+            test_part(offset.to_array(), [1., 0., 0.]),
+            test_part(offset.to_array(), [1., 0., 0.]),
+        ];
+        assert_eq!(
+            adapt_cartoon_clothing_offsets(&mut parts, &[true, false], &current, &field),
+            1
+        );
+        assert!(Vec3::from(parts[0].positions[0]).abs_diff_eq(expected, 1e-5));
+        assert_eq!(parts[1].positions[0], offset.to_array());
+    }
+
+    #[test]
+    fn cartoon_clothing_keeps_legacy_position_for_negative_stock_weights() {
+        let neutral = vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+        let current = vec![[0., 0., 0.], [2., 0., 0.], [0., 3., 0.]];
+        let field = BodyDeformation::new(&neutral, &current, &[0, 1, 2, 2], &[1, 1, 1]).unwrap();
+        let position = [0.5, 0.1, 0.];
+        let mut parts = vec![test_part(position, [1.1, -0.1, 0.])];
+        assert_eq!(
+            adapt_cartoon_clothing_offsets(&mut parts, &[true], &current, &field),
+            0
+        );
+        assert_eq!(parts[0].positions[0], position);
+    }
+
+    #[test]
+    fn briefs_are_explicitly_excluded_from_cartoon_offset_transport() {
+        assert!(!is_adaptive_stock_clothing("briefs", Some("bottom")));
+        let neutral = vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+        let current = vec![[0., 0., 0.], [2., 0., 0.], [0., 3., 0.]];
+        let field = BodyDeformation::new(&neutral, &current, &[0, 1, 2, 2], &[1, 1, 1]).unwrap();
+        let original = [0.03, 0.01, 0.02];
+        let mut shell = vec![test_part(original, [1., 0., 0.])];
+        assert_eq!(
+            adapt_cartoon_clothing_offsets(&mut shell, &[false], &current, &field),
+            0
+        );
+        assert_eq!(shell[0].positions[0], original);
+    }
+
+    #[test]
+    fn layer_clearance_runs_after_adaptive_offsets() {
+        let neutral = vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+        let current = vec![[0., 0., 0.], [2., 0., 0.], [0., 3., 0.]];
+        let field = BodyDeformation::new(&neutral, &current, &[0, 1, 2, 2], &[1, 1, 1]).unwrap();
+        let mut parts = vec![
+            test_part([0., 0., 0.01], [1., 0., 0.]),
+            test_part([0., 0., 0.011], [1., 0., 0.]),
+            test_part([0., 0., 0.012], [1., 0., 0.]),
+        ];
+        adapt_cartoon_clothing_offsets(&mut parts, &[true, true, true], &current, &field);
+        separate_layers(
+            &mut parts,
+            &[1, 2, 3],
+            &current,
+            &[Vec3::Z; 3],
+            &[0, 1, 2, 2],
+        );
+        assert!(parts[1].positions[0][2] >= parts[0].positions[0][2] + LAYER_GAP - 1e-6);
+        assert!(parts[2].positions[0][2] >= parts[1].positions[0][2] + LAYER_GAP - 1e-6);
     }
 }

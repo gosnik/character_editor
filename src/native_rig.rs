@@ -4,6 +4,8 @@
 //! rotation deltas for the canonical game skeleton, so it is safe to apply to
 //! the proportioned skeleton built from an individual character's joints.
 
+#[cfg(test)]
+use crate::native_character::SkinWeightSourceTopology;
 use crate::{
     native_assets::{Array, NativeLibrary},
     native_character::NativePart,
@@ -12,7 +14,7 @@ use bevy::prelude::{Mat4, Quat, Vec3};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::Read,
     path::PathBuf,
@@ -425,6 +427,30 @@ impl NativeRig {
                 }
             }
             (joints[vertex], weights[vertex]) = top_four(accumulated);
+        }
+        if let Ok(vertices) = skin_weight_repair_vertices(part) {
+            if !vertices.is_empty() {
+                if let Ok((repaired_joints, repaired_weights)) =
+                    repair_skin_weights(part, &joints, &weights, &vertices, self.bones.len())
+                {
+                    joints = repaired_joints;
+                    weights = repaired_weights;
+                }
+            }
+        }
+        // This remains opt-in metadata on imported garments.  CustomGarment
+        // validates it before a part is assembled; malformed ad-hoc runtime
+        // parts retain the historical direct transfer rather than risking a
+        // malformed topology allocation in this infallible render path.
+        if let Ok(iterations) = skin_weight_smoothing_iterations(part) {
+            if iterations > 0 {
+                if let Ok((smoothed_joints, smoothed_weights)) =
+                    smooth_skin_weights(part, &joints, &weights, iterations, self.bones.len())
+                {
+                    joints = smoothed_joints;
+                    weights = smoothed_weights;
+                }
+            }
         }
         (joints, weights)
     }
@@ -1208,9 +1234,345 @@ fn array<'a>(pack: &'a crate::native_assets::Pack, name: &str) -> Result<&'a Arr
         .ok_or_else(|| format!("base pack missing {name}"))
 }
 
+const MAX_SMOOTH_SKIN_VERTICES: usize = 100_000;
+const MAX_SMOOTH_SKIN_INDICES: usize = 1_200_000;
+const SKIN_WEIGHT_SMOOTH_BLEND: f32 = 0.35;
+
+fn skin_weight_smoothing_iterations(part: &NativePart) -> Result<u8, &'static str> {
+    let Some(value) = part.material.get("fitSkinWeightSmoothingIterations") else {
+        return Ok(0);
+    };
+    let iterations = value
+        .as_u64()
+        .ok_or("fitSkinWeightSmoothingIterations must be an integer within 0..=8")?;
+    if iterations > 8 {
+        return Err("fitSkinWeightSmoothingIterations must be an integer within 0..=8");
+    }
+    Ok(iterations as u8)
+}
+
+const MAX_REPAIR_SKIN_VERTICES: usize = 4_096;
+const REPAIR_SKIN_ITERATIONS: usize = 64;
+
+/// Parses an explicit, bounded list of vertices whose transferred skin weights
+/// are known to be wrong. Exact-position aliases are repaired together.
+fn skin_weight_repair_vertices(part: &NativePart) -> Result<Vec<usize>, &'static str> {
+    let Some(value) = part.material.get("fitSkinWeightRepairVertices") else {
+        return Ok(Vec::new());
+    };
+    if skin_weight_smoothing_iterations(part)? != 0 {
+        return Err(
+            "fitSkinWeightRepairVertices cannot be combined with fitSkinWeightSmoothingIterations",
+        );
+    }
+    let values = value
+        .as_array()
+        .ok_or("fitSkinWeightRepairVertices must be an array of vertex indices")?;
+    if values.len() > MAX_REPAIR_SKIN_VERTICES {
+        return Err("fitSkinWeightRepairVertices exceeds 4096 vertices");
+    }
+    let mut vertices = BTreeSet::new();
+    for value in values {
+        let vertex = value
+            .as_u64()
+            .ok_or("fitSkinWeightRepairVertices must contain integer vertex indices")?;
+        let vertex = usize::try_from(vertex)
+            .map_err(|_| "fitSkinWeightRepairVertices contains an out-of-range vertex index")?;
+        if vertex >= part.positions.len() {
+            return Err("fitSkinWeightRepairVertices contains an out-of-range vertex index");
+        }
+        if !vertices.insert(vertex) {
+            return Err("fitSkinWeightRepairVertices contains duplicate vertex indices");
+        }
+    }
+    Ok(vertices.into_iter().collect())
+}
+
+fn skin_weight_groups(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Result<(Vec<usize>, Vec<Vec<usize>>, Vec<BTreeSet<usize>>), &'static str> {
+    if positions.is_empty()
+        || positions.len() > MAX_SMOOTH_SKIN_VERTICES
+        || indices.len() > MAX_SMOOTH_SKIN_INDICES
+        || indices.len() % 3 != 0
+        || indices
+            .iter()
+            .any(|&index| index as usize >= positions.len())
+        || positions
+            .iter()
+            .any(|position| position.iter().any(|value| !value.is_finite()))
+    {
+        return Err("invalid skin-weight repair topology");
+    }
+    let key =
+        |position: [f32; 3]| position.map(|value| if value == 0. { 0 } else { value.to_bits() });
+    let mut group_by_position = BTreeMap::<[u32; 3], usize>::new();
+    let mut vertex_groups = Vec::with_capacity(positions.len());
+    let mut group_vertices = Vec::<Vec<usize>>::new();
+    for (vertex, &position) in positions.iter().enumerate() {
+        let next = group_vertices.len();
+        let group = *group_by_position.entry(key(position)).or_insert_with(|| {
+            group_vertices.push(Vec::new());
+            next
+        });
+        group_vertices[group].push(vertex);
+        vertex_groups.push(group);
+    }
+    let mut neighbours = vec![BTreeSet::<usize>::new(); group_vertices.len()];
+    for triangle in indices.chunks_exact(3) {
+        let groups = [
+            vertex_groups[triangle[0] as usize],
+            vertex_groups[triangle[1] as usize],
+            vertex_groups[triangle[2] as usize],
+        ];
+        for (a, b) in [
+            (groups[0], groups[1]),
+            (groups[1], groups[2]),
+            (groups[2], groups[0]),
+        ] {
+            if a != b {
+                neighbours[a].insert(b);
+                neighbours[b].insert(a);
+            }
+        }
+    }
+    Ok((vertex_groups, group_vertices, neighbours))
+}
+
+/// Harmonic inpainting for a deliberately marked bad skin-weight island. Only
+/// marked groups are updated; all adjacent direct-transfer weights are fixed
+/// Dirichlet boundary values.
+fn repair_skin_weights(
+    part: &NativePart,
+    joints: &[[u16; 4]],
+    weights: &[[f32; 4]],
+    vertices: &[usize],
+    bone_count: usize,
+) -> Result<(Vec<[u16; 4]>, Vec<[f32; 4]>), &'static str> {
+    let vertex_count = part.positions.len();
+    if joints.len() != vertex_count || weights.len() != vertex_count {
+        return Err("invalid skin-weight repair inputs");
+    }
+    let (topology_positions, topology_indices) = part
+        .skin_weight_source_topology
+        .as_deref()
+        .map(|topology| (topology.positions.as_slice(), topology.indices.as_slice()))
+        .unwrap_or((&part.positions, &part.indices));
+    if topology_positions.len() != vertex_count
+        || topology_positions
+            .iter()
+            .any(|position| position.iter().any(|value| !value.is_finite()))
+    {
+        return Err("invalid immutable skin-weight repair source positions");
+    }
+    let (vertex_groups, group_vertices, neighbours) =
+        skin_weight_groups(topology_positions, topology_indices)?;
+    let mut marked = vec![false; group_vertices.len()];
+    for &vertex in vertices {
+        let group = *vertex_groups
+            .get(vertex)
+            .ok_or("invalid skin-weight repair vertex")?;
+        marked[group] = true;
+    }
+    // Every marked connected component must have an unmarked boundary.
+    let mut visited = vec![false; marked.len()];
+    for start in 0..marked.len() {
+        if !marked[start] || visited[start] {
+            continue;
+        }
+        let mut stack = vec![start];
+        visited[start] = true;
+        let mut has_boundary = false;
+        while let Some(group) = stack.pop() {
+            for &neighbour in &neighbours[group] {
+                if marked[neighbour] {
+                    if !visited[neighbour] {
+                        visited[neighbour] = true;
+                        stack.push(neighbour);
+                    }
+                } else {
+                    has_boundary = true;
+                }
+            }
+        }
+        if !has_boundary {
+            return Err("fitSkinWeightRepairVertices component has no unmarked boundary");
+        }
+    }
+    let mut current = Vec::with_capacity(group_vertices.len());
+    for group in &group_vertices {
+        let mut accumulated = HashMap::<u16, f32>::new();
+        for &vertex in group {
+            for influence in 0..4 {
+                let joint = joints[vertex][influence];
+                let weight = weights[vertex][influence];
+                if (joint as usize) < bone_count && weight.is_finite() && weight > 0. {
+                    *accumulated.entry(joint).or_default() += weight;
+                }
+            }
+        }
+        current.push(top_four_stable(accumulated));
+    }
+    for _ in 0..REPAIR_SKIN_ITERATIONS {
+        let mut next = current.clone();
+        for (group, adjacent) in neighbours.iter().enumerate() {
+            if !marked[group] || adjacent.is_empty() {
+                continue;
+            }
+            let mut accumulated = HashMap::<u16, f32>::new();
+            let scale = 1. / adjacent.len() as f32;
+            for &neighbour in adjacent {
+                for influence in 0..4 {
+                    *accumulated
+                        .entry(current[neighbour].0[influence])
+                        .or_default() += current[neighbour].1[influence] * scale;
+                }
+            }
+            next[group] = top_four_stable(accumulated);
+        }
+        current = next;
+    }
+    let mut output_joints = joints.to_vec();
+    let mut output_weights = weights.to_vec();
+    for (group, group_vertices) in group_vertices.iter().enumerate() {
+        if marked[group] {
+            for &vertex in group_vertices {
+                output_joints[vertex] = current[group].0;
+                output_weights[vertex] = current[group].1;
+            }
+        }
+    }
+    Ok((output_joints, output_weights))
+}
+
+/// Smooths transferred weights only across indexed mesh edges.  Equal source
+/// positions are first welded into one group, so UV/seam aliases get an
+/// identical result without changing a position, UV, index, or source ref.
+fn smooth_skin_weights(
+    part: &NativePart,
+    joints: &[[u16; 4]],
+    weights: &[[f32; 4]],
+    iterations: u8,
+    bone_count: usize,
+) -> Result<(Vec<[u16; 4]>, Vec<[f32; 4]>), &'static str> {
+    let vertex_count = part.positions.len();
+    if vertex_count == 0
+        || vertex_count > MAX_SMOOTH_SKIN_VERTICES
+        || joints.len() != vertex_count
+        || weights.len() != vertex_count
+        || part.indices.len() > MAX_SMOOTH_SKIN_INDICES
+        || part.indices.len() % 3 != 0
+        || part
+            .indices
+            .iter()
+            .any(|&index| index as usize >= vertex_count)
+        || part
+            .positions
+            .iter()
+            .any(|position| position.iter().any(|value| !value.is_finite()))
+    {
+        return Err("invalid skin-weight smoothing topology");
+    }
+
+    // Canonicalize signed zero so numerically identical authoring points weld.
+    let key =
+        |position: [f32; 3]| position.map(|value| if value == 0. { 0 } else { value.to_bits() });
+    let mut group_by_position = BTreeMap::<[u32; 3], usize>::new();
+    let mut vertex_groups = Vec::with_capacity(vertex_count);
+    let mut group_vertices = Vec::<Vec<usize>>::new();
+    for (vertex, &position) in part.positions.iter().enumerate() {
+        let next = group_vertices.len();
+        let group = *group_by_position.entry(key(position)).or_insert_with(|| {
+            group_vertices.push(Vec::new());
+            next
+        });
+        group_vertices[group].push(vertex);
+        vertex_groups.push(group);
+    }
+    let mut neighbours = vec![BTreeSet::<usize>::new(); group_vertices.len()];
+    for triangle in part.indices.chunks_exact(3) {
+        let groups = [
+            vertex_groups[triangle[0] as usize],
+            vertex_groups[triangle[1] as usize],
+            vertex_groups[triangle[2] as usize],
+        ];
+        for (a, b) in [
+            (groups[0], groups[1]),
+            (groups[1], groups[2]),
+            (groups[2], groups[0]),
+        ] {
+            if a != b {
+                neighbours[a].insert(b);
+                neighbours[b].insert(a);
+            }
+        }
+    }
+
+    let mut current = Vec::with_capacity(group_vertices.len());
+    for vertices in &group_vertices {
+        let mut accumulated = HashMap::<u16, f32>::new();
+        for &vertex in vertices {
+            for influence in 0..4 {
+                let joint = joints[vertex][influence];
+                let weight = weights[vertex][influence];
+                if (joint as usize) < bone_count && weight.is_finite() && weight > 0. {
+                    *accumulated.entry(joint).or_default() += weight;
+                }
+            }
+        }
+        current.push(top_four_stable(accumulated));
+    }
+    for _ in 0..iterations {
+        let mut next = current.clone();
+        for (group, adjacent) in neighbours.iter().enumerate() {
+            if adjacent.is_empty() {
+                continue;
+            }
+            let mut accumulated = HashMap::<u16, f32>::new();
+            for influence in 0..4 {
+                *accumulated.entry(current[group].0[influence]).or_default() +=
+                    current[group].1[influence] * (1. - SKIN_WEIGHT_SMOOTH_BLEND);
+            }
+            let neighbour_scale = SKIN_WEIGHT_SMOOTH_BLEND / adjacent.len() as f32;
+            for &neighbour in adjacent {
+                for influence in 0..4 {
+                    *accumulated
+                        .entry(current[neighbour].0[influence])
+                        .or_default() += current[neighbour].1[influence] * neighbour_scale;
+                }
+            }
+            next[group] = top_four_stable(accumulated);
+        }
+        current = next;
+    }
+    let mut output_joints = vec![[0; 4]; vertex_count];
+    let mut output_weights = vec![[0.; 4]; vertex_count];
+    for (group, vertices) in group_vertices.iter().enumerate() {
+        for &vertex in vertices {
+            output_joints[vertex] = current[group].0;
+            output_weights[vertex] = current[group].1;
+        }
+    }
+    Ok((output_joints, output_weights))
+}
+
 fn top_four(weights: HashMap<u16, f32>) -> ([u16; 4], [f32; 4]) {
     let mut entries: Vec<_> = weights.into_iter().filter(|(_, w)| *w > 0.0).collect();
-    entries.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // Preserve the pre-existing direct-transfer tie behaviour for UV copies
+    // with identical anchors.
+    entries.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    normalize_top_four(entries)
+}
+
+/// Names the deterministic selection used by the smoother.  This delegates to
+/// the pre-existing direct-transfer ordering so opt-in metadata cannot alter
+/// the default path.
+fn top_four_stable(weights: HashMap<u16, f32>) -> ([u16; 4], [f32; 4]) {
+    top_four(weights)
+}
+
+fn normalize_top_four(entries: Vec<(u16, f32)>) -> ([u16; 4], [f32; 4]) {
     let mut joints = [0; 4];
     let mut values = [0.0; 4];
     for (i, (joint, weight)) in entries.into_iter().take(4).enumerate() {
@@ -1229,6 +1591,265 @@ fn top_four(weights: HashMap<u16, f32>) -> ([u16; 4], [f32; 4]) {
 }
 fn quat(v: [f32; 4]) -> Quat {
     Quat::from_xyzw(v[0], v[1], v[2], v[3]).normalize()
+}
+
+#[cfg(test)]
+mod skin_weight_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn part(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> NativePart {
+        NativePart {
+            name: "smoothing-test".into(),
+            uvs: vec![[0.; 2]; positions.len()],
+            refs: vec![[0; 3]; positions.len()],
+            ref_weights: vec![[1., 0., 0.]; positions.len()],
+            rigid_joint: None,
+            skin_weight_source_topology: None,
+            material: json!({"fitSkinWeightSmoothingIterations": 1}),
+            positions,
+            indices,
+        }
+    }
+
+    fn weights(primary: &[u16]) -> (Vec<[u16; 4]>, Vec<[f32; 4]>) {
+        (
+            primary.iter().map(|&joint| [joint, 0, 0, 0]).collect(),
+            vec![[1., 0., 0., 0.]; primary.len()],
+        )
+    }
+
+    fn repair_part(positions: Vec<[f32; 3]>, indices: Vec<u32>, repaired: &[usize]) -> NativePart {
+        NativePart {
+            name: "repair-test".into(),
+            uvs: vec![[0.; 2]; positions.len()],
+            refs: vec![[0; 3]; positions.len()],
+            ref_weights: vec![[1., 0., 0.]; positions.len()],
+            rigid_joint: None,
+            skin_weight_source_topology: None,
+            material: json!({"fitSkinWeightRepairVertices": repaired}),
+            positions,
+            indices,
+        }
+    }
+
+    #[test]
+    fn equal_weight_cutoff_is_stable_across_map_orders() {
+        for rotation in 0..6 {
+            let mut weights = HashMap::new();
+            for offset in 0..6 {
+                weights.insert(((offset + rotation) % 6 + 1) as u16, 1.);
+            }
+            assert_eq!(top_four_stable(weights), ([1, 2, 3, 4], [0.25; 4]));
+        }
+    }
+
+    #[test]
+    fn weight_priority_precedes_joint_id() {
+        let weights = [(1, 1.), (2, 1.), (3, 1.), (4, 1.), (9, 4.)]
+            .into_iter()
+            .collect();
+        let (joints, weights) = top_four(weights);
+        assert_eq!(joints, [9, 1, 2, 3]);
+        assert_eq!(weights, [4. / 7., 1. / 7., 1. / 7., 1. / 7.]);
+    }
+
+    #[test]
+    fn skin_weight_smoothing_is_opt_in_and_welds_seam_aliases() {
+        let part = part(
+            vec![[0., 0., 0.], [0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            vec![0, 2, 3, 1, 3, 2],
+        );
+        let (joints, weights) = weights(&[1, 2, 1, 1]);
+        let (smoothed_joints, smoothed_weights) =
+            smooth_skin_weights(&part, &joints, &weights, 1, 3).unwrap();
+        assert_eq!(smoothed_joints[0], smoothed_joints[1]);
+        assert_eq!(smoothed_weights[0], smoothed_weights[1]);
+        assert_eq!(
+            skin_weight_smoothing_iterations(&NativePart {
+                material: json!({}),
+                ..part.clone()
+            })
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn skin_weight_smoothing_reduces_an_isolated_anomaly_without_crossing_components() {
+        let part = part(
+            vec![
+                [0., 0., 0.],
+                [1., 0., 0.],
+                [0., 1., 0.],
+                [10., 0., 0.],
+                [11., 0., 0.],
+                [10., 1., 0.],
+            ],
+            vec![0, 1, 2, 3, 4, 5],
+        );
+        let (joints, weights) = weights(&[1, 0, 0, 2, 2, 2]);
+        let (smoothed_joints, smoothed_weights) =
+            smooth_skin_weights(&part, &joints, &weights, 1, 3).unwrap();
+        let anomaly_weight = smoothed_joints[0]
+            .iter()
+            .zip(smoothed_weights[0])
+            .find_map(|(&joint, weight)| (joint == 1).then_some(weight))
+            .unwrap_or(0.);
+        assert!(anomaly_weight > 0. && anomaly_weight < 1.);
+        assert_eq!(smoothed_joints[3], [2, 0, 0, 0]);
+        assert_eq!(smoothed_weights[3], [1., 0., 0., 0.]);
+    }
+
+    #[test]
+    fn skin_weight_smoothing_is_normalized_finite_and_deterministic_at_ties() {
+        let part = part(
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            vec![0, 1, 2],
+        );
+        let (joints, weights) = weights(&[4, 2, 3]);
+        let first = smooth_skin_weights(&part, &joints, &weights, 1, 5).unwrap();
+        let second = smooth_skin_weights(&part, &joints, &weights, 1, 5).unwrap();
+        assert_eq!(first, second);
+        for weight in first.1 {
+            assert!(weight.iter().all(|value| value.is_finite() && *value >= 0.));
+            assert!((weight.iter().sum::<f32>() - 1.).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn skin_weight_repair_harmonically_fixes_an_island_and_welds_aliases() {
+        // Vertices 1 and 2 are coincident UV aliases in a wrong-joint island;
+        // their unmarked ring carries joint 2 and remains fixed.
+        let part = repair_part(
+            vec![
+                [0., 0., 0.],
+                [1., 0., 0.],
+                [1., 0., 0.],
+                [2., 0., 0.],
+                [0., 1., 0.],
+                [1., 1., 0.],
+                [2., 1., 0.],
+            ],
+            vec![0, 1, 4, 1, 5, 4, 1, 3, 5, 3, 6, 5, 1, 2, 5],
+            &[1],
+        );
+        let (joints, weights) = weights(&[2, 9, 9, 2, 2, 2, 2]);
+        let vertices = skin_weight_repair_vertices(&part).unwrap();
+        let (repaired_joints, repaired_weights) =
+            repair_skin_weights(&part, &joints, &weights, &vertices, 10).unwrap();
+        assert_eq!(repaired_joints[1], [2, 0, 0, 0]);
+        assert_eq!(repaired_weights[1], [1., 0., 0., 0.]);
+        assert_eq!(repaired_joints[1], repaired_joints[2]);
+        assert_eq!(repaired_weights[1], repaired_weights[2]);
+        assert_eq!(repaired_joints[0], joints[0]);
+        assert_eq!(repaired_weights[0], weights[0]);
+    }
+
+    #[test]
+    fn skin_weight_repair_uses_immutable_source_welds_after_fitting() {
+        // Fitting can split authored UV aliases and collapse unrelated vertices
+        // in the live position stream. Repair must still weld the former while
+        // leaving the latter fixed as a Dirichlet boundary.
+        let source_positions = vec![
+            [0., 0., 0.],
+            [1., 0., 0.],
+            [1., 0., 0.],
+            [2., 0., 0.],
+            [0., 1., 0.],
+            [1., 1., 0.],
+            [2., 1., 0.],
+        ];
+        let mut part = repair_part(
+            vec![
+                [0., 0., 0.],
+                [1., -0.25, 0.],
+                [1., 0.25, 0.],
+                [1., -0.25, 0.],
+                [0., 1., 0.],
+                [1., 1., 0.],
+                [2., 1., 0.],
+            ],
+            vec![0, 1, 4, 1, 5, 4, 1, 3, 5, 3, 6, 5, 1, 2, 5],
+            &[1],
+        );
+        part.skin_weight_source_topology = Some(std::sync::Arc::new(SkinWeightSourceTopology {
+            positions: source_positions,
+            indices: vec![0, 1, 4, 1, 5, 4, 1, 3, 5, 3, 6, 5, 1, 2, 5],
+        }));
+        let (joints, weights) = weights(&[2, 9, 9, 7, 2, 2, 2]);
+        let vertices = skin_weight_repair_vertices(&part).unwrap();
+        let (repaired_joints, repaired_weights) =
+            repair_skin_weights(&part, &joints, &weights, &vertices, 10).unwrap();
+
+        assert_eq!(repaired_joints[1], repaired_joints[2]);
+        assert_eq!(repaired_weights[1], repaired_weights[2]);
+        assert_eq!(repaired_joints[3], joints[3]);
+        assert_eq!(repaired_weights[3], weights[3]);
+    }
+
+    #[test]
+    fn skin_weight_repair_rejects_invalid_immutable_source_positions() {
+        let mut part = repair_part(
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            vec![0, 1, 2],
+            &[0],
+        );
+        part.skin_weight_source_topology = Some(std::sync::Arc::new(SkinWeightSourceTopology {
+            positions: vec![[0., 0., 0.]],
+            indices: vec![0, 0, 0],
+        }));
+        let (joints, weights) = weights(&[1, 2, 2]);
+        let vertices = skin_weight_repair_vertices(&part).unwrap();
+        assert!(repair_skin_weights(&part, &joints, &weights, &vertices, 3).is_err());
+    }
+
+    #[test]
+    fn skin_weight_repair_uses_source_topology_after_runtime_triangle_culling() {
+        let source_positions = vec![
+            [0., 0., 0.],
+            [1., 0., 0.],
+            [1., 0., 0.],
+            [2., 0., 0.],
+            [0., 1., 0.],
+            [1., 1., 0.],
+            [2., 1., 0.],
+        ];
+        let source_indices = vec![0, 1, 4, 1, 5, 4, 1, 3, 5, 3, 6, 5, 1, 2, 5];
+        let mut part = repair_part(source_positions.clone(), source_indices.clone(), &[1]);
+        // Occlusion leaves a degenerate runtime fragment with no unmarked
+        // source-group boundary. The saved authoring topology still has one.
+        part.indices = vec![1, 2, 1];
+        part.skin_weight_source_topology = Some(std::sync::Arc::new(SkinWeightSourceTopology {
+            positions: source_positions,
+            indices: source_indices,
+        }));
+        let (joints, weights) = weights(&[2, 9, 9, 2, 2, 2, 2]);
+        let vertices = skin_weight_repair_vertices(&part).unwrap();
+        let (repaired_joints, repaired_weights) =
+            repair_skin_weights(&part, &joints, &weights, &vertices, 10).unwrap();
+        assert_eq!(repaired_joints[1], [2, 0, 0, 0]);
+        assert_eq!(repaired_weights[1], [1., 0., 0., 0.]);
+        assert_eq!(repaired_joints[1], repaired_joints[2]);
+    }
+
+    #[test]
+    fn skin_weight_repair_is_absent_by_default_and_rejects_closed_components() {
+        let plain = repair_part(
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            vec![0, 1, 2],
+            &[],
+        );
+        assert!(skin_weight_repair_vertices(&plain).unwrap().is_empty());
+        let closed = repair_part(
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            vec![0, 1, 2],
+            &[0, 1, 2],
+        );
+        let (joints, weights) = weights(&[1, 1, 1]);
+        let vertices = skin_weight_repair_vertices(&closed).unwrap();
+        assert!(repair_skin_weights(&closed, &joints, &weights, &vertices, 2).is_err());
+    }
 }
 fn interpolate_vec3(values: &[[f32; 3]], a: usize, b: usize, t: f32) -> Vec3 {
     let a = Vec3::from(values.get(a).copied().unwrap_or([0.0; 3]));

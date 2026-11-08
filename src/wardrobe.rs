@@ -198,6 +198,22 @@ pub fn test_profile(
     clips: &[String],
     samples: usize,
 ) -> Result<Value, String> {
+    test_profile_with_contact_details(lib, profile, bases, clips, samples, None)
+}
+
+/// Optional bounded, exact contact geometry for fitting diagnostics. Vertex
+/// indices address the exported part streams, including original custom vertices.
+pub fn test_profile_with_contact_details(
+    lib: &NativeLibrary,
+    profile: &WardrobeProfile,
+    bases: &[(String, AraRecipe)],
+    clips: &[String],
+    samples: usize,
+    contact_part: Option<&str>,
+) -> Result<Value, String> {
+    if contact_part.is_some_and(|name| name.is_empty() || name.len() > 256) {
+        return Err("contact part name must contain 1..256 bytes".into());
+    }
     profile.validate()?;
     if bases.is_empty() || bases.len() > 64 || !(1..=120).contains(&samples) || clips.len() > 100 {
         return Err(
@@ -218,6 +234,7 @@ pub fn test_profile(
     let mut cases = vec![];
     let mut failures = 0;
     let mut warnings = 0;
+    let mut remaining_contact_details = MAX_REPORT_CONTACT_DETAILS;
     for (name, base) in bases {
         let result = (|| {
             let mut recipe = base.clone();
@@ -257,6 +274,11 @@ pub fn test_profile(
                 .filter(|(_, p)| is_garment(&p.name))
                 .map(|(i, _)| i)
                 .collect();
+            if contact_part
+                .is_some_and(|name| !garments.iter().any(|&i| character.parts[i].name == name))
+            {
+                return Err("requested contact part is absent from the fitted outfit".into());
+            }
             let bindings = character.rig.as_ref().map(|rig| {
                 character
                     .parts
@@ -266,6 +288,7 @@ pub fn test_profile(
             });
             let mut poses = vec![];
             let mut intersections = 0;
+            let mut intersections_by_garment = BTreeMap::<String, usize>::new();
             let mut check_pose = |clip: &str, time: f32| -> Result<(), String> {
                 let positions = if let Some(rig) = &character.rig {
                     let matrices = if clip == "rest" {
@@ -298,16 +321,26 @@ pub fn test_profile(
                 if positions.iter().flatten().flatten().any(|v| !v.is_finite()) {
                     return Err(format!("nonfinite skinned geometry {clip} at {time}"));
                 }
-                let count = body_cloth_intersections(
+                let (counts, details) = body_cloth_contacts(
                     &character.parts[body],
                     &positions[body],
                     &garments
                         .iter()
                         .map(|&i| (&character.parts[i], positions[i].as_slice()))
                         .collect::<Vec<_>>(),
+                    contact_part,
+                    &mut remaining_contact_details,
                 );
+                let count: usize = counts.values().sum();
                 intersections += count;
-                poses.push(json!({"clip":clip,"time_s":time,"body_cloth_intersections":count}));
+                for (name, count) in &counts {
+                    *intersections_by_garment.entry(name.clone()).or_default() += count;
+                }
+                let mut pose = json!({"clip":clip,"time_s":time,"body_cloth_intersections":count,"body_cloth_intersections_by_garment":counts});
+                if let Some(details) = details {
+                    pose["contact_details"] = details;
+                }
+                poses.push(pose);
                 Ok(())
             };
             check_pose("rest", 0.)?;
@@ -327,7 +360,7 @@ pub fn test_profile(
                 + usize::from(character.rig.is_none() && !clips.is_empty());
             warnings += warning_count;
             Ok(
-                json!({"name":name,"ok":true,"warning_count":warning_count,"height_m":character.height,"triangles":character.triangle_count(),"garments":garments.iter().map(|&i|character.parts[i].name.clone()).collect::<Vec<_>>(),"degenerate_triangles":degenerate,"hair_clearance_warnings":character.hair_fit.remaining_violations,"body_cloth_intersections":intersections,"poses":poses}),
+                json!({"name":name,"ok":true,"warning_count":warning_count,"height_m":character.height,"triangles":character.triangle_count(),"garments":garments.iter().map(|&i|character.parts[i].name.clone()).collect::<Vec<_>>(),"degenerate_triangles":degenerate,"hair_clearance_warnings":character.hair_fit.remaining_violations,"body_cloth_intersections":intersections,"body_cloth_intersections_by_garment":intersections_by_garment,"poses":poses}),
             )
         })();
         match result {
@@ -338,9 +371,15 @@ pub fn test_profile(
             }
         }
     }
-    Ok(
-        json!({"version":1,"wardrobe":profile.name,"ok":failures==0,"failed":failures,"warning_count":warnings,"cases":cases,"method":"Sampled triangle intersections against visible body geometry; coplanar contacts ignored. Hair clearance warnings are bounded-fit diagnostics. Review warnings visually; this is not continuous collision detection or cloth simulation."}),
-    )
+    let mut report = json!({"version":1,"wardrobe":profile.name,"ok":failures==0,"failed":failures,"warning_count":warnings,"cases":cases,"method":"Sampled triangle intersections against visible body geometry; coplanar contacts ignored. Hair clearance warnings are bounded-fit diagnostics. Review warnings visually; this is not continuous collision detection or cloth simulation."});
+    if contact_part.is_some() {
+        report["contact_detail_budget"] = json!({
+            "limit": MAX_REPORT_CONTACT_DETAILS,
+            "recorded": MAX_REPORT_CONTACT_DETAILS - remaining_contact_details,
+            "exhausted": remaining_contact_details == 0,
+        });
+    }
+    Ok(report)
 }
 #[derive(Clone, Copy)]
 struct Tri {
@@ -427,34 +466,70 @@ fn intersect(a: Tri, b: Tri) -> bool {
             .iter()
             .any(|&(p, q)| segment_hits(p, q, a))
 }
-fn body_cloth_intersections(
+fn body_cloth_intersections_by_garment(
     body: &NativePart,
     body_positions: &[[f32; 3]],
     clothes: &[(&NativePart, &[[f32; 3]])],
-) -> usize {
-    let body = triangles(body, body_positions);
+) -> BTreeMap<String, usize> {
+    body_cloth_contacts(body, body_positions, clothes, None, &mut 0).0
+}
+
+const MAX_CONTACT_DETAILS: usize = 256;
+const MAX_REPORT_CONTACT_DETAILS: usize = 8192;
+fn body_cloth_contacts(
+    body_part: &NativePart,
+    body_positions: &[[f32; 3]],
+    clothes: &[(&NativePart, &[[f32; 3]])],
+    contact_part: Option<&str>,
+    remaining_details: &mut usize,
+) -> (BTreeMap<String, usize>, Option<Value>) {
+    let detail_limit = (*remaining_details).min(MAX_CONTACT_DETAILS);
+    let body = triangles(body_part, body_positions);
     let mut grid = BTreeMap::<[i32; 3], Vec<usize>>::new();
     for (index, tri) in body.iter().enumerate() {
         for cell in cells(*tri) {
             grid.entry(cell).or_default().push(index);
         }
     }
-    let mut count = 0;
+    let mut counts = BTreeMap::new();
+    let mut details = vec![];
     for (part, positions) in clothes {
-        for tri in triangles(part, positions) {
+        let count = counts.entry(part.name.clone()).or_insert(0);
+        for (triangle_index, tri) in triangles(part, positions).into_iter().enumerate() {
             let mut candidates = BTreeSet::new();
             for cell in cells(tri) {
                 if let Some(indices) = grid.get(&cell) {
                     candidates.extend(indices.iter().copied());
                 }
             }
-            if candidates.into_iter().any(|i| intersect(tri, body[i])) {
-                count += 1;
+            if let Some(body_index) = candidates.into_iter().find(|&i| intersect(tri, body[i])) {
+                *count += 1;
+                if contact_part == Some(part.name.as_str()) && details.len() < detail_limit {
+                    let ids = &part.indices[triangle_index * 3..triangle_index * 3 + 3];
+                    let hit = body[body_index];
+                    details.push(json!({
+                        "cloth_triangle_index": triangle_index,
+                        "cloth_vertex_indices": ids,
+                        "cloth_positions_m": [tri.a.to_array(), tri.b.to_array(), tri.c.to_array()],
+                        "cloth_unposed_positions_m": ids.iter().map(|&i| part.positions[i as usize]).collect::<Vec<_>>(),
+                        "body_triangle_index": body_index,
+                        "body_vertex_indices": &body_part.indices[body_index * 3..body_index * 3 + 3],
+                        "body_positions_m": [hit.a.to_array(), hit.b.to_array(), hit.c.to_array()],
+                        "body_outward": (hit.b-hit.a).cross(hit.c-hit.a).normalize_or_zero().to_array(),
+                    }));
+                }
             }
         }
     }
-    count
+    *remaining_details -= details.len();
+    let report = contact_part.map(|name| {
+        let total = counts.get(name).copied().unwrap_or(0);
+        json!({"part": name, "units": "m", "limit": detail_limit,
+            "total_intersecting_triangles": total, "truncated": total > details.len(), "triangles": details})
+    });
+    (counts, report)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +603,95 @@ mod tests {
                 c: a.c + Vec3::Y
             }
         ));
+    }
+    #[test]
+    fn intersection_report_attributes_each_garment_including_clear_parts() {
+        fn part(name: &str, positions: Vec<[f32; 3]>) -> NativePart {
+            NativePart {
+                name: name.into(),
+                positions,
+                indices: vec![0, 1, 2],
+                uvs: vec![],
+                refs: vec![],
+                ref_weights: vec![],
+                rigid_joint: None,
+                skin_weight_source_topology: None,
+                material: json!({}),
+            }
+        }
+        let body = part(
+            "Body",
+            vec![[-0.04, 0., -0.04], [0.04, 0., -0.04], [0., 0., 0.04]],
+        );
+        let crossing = part(
+            "custom:shirt",
+            vec![[0., -0.02, 0.], [0., 0.02, 0.], [0.02, 0.02, 0.]],
+        );
+        let clear = part(
+            "custom:boots",
+            body.positions
+                .iter()
+                .map(|p| [p[0], p[1] + 0.1, p[2]])
+                .collect(),
+        );
+        let counts = body_cloth_intersections_by_garment(
+            &body,
+            &body.positions,
+            &[(&crossing, &crossing.positions), (&clear, &clear.positions)],
+        );
+        assert_eq!(counts.get("custom:shirt"), Some(&1));
+        assert_eq!(counts.get("custom:boots"), Some(&0));
+        assert_eq!(counts.values().sum::<usize>(), 1);
+        let (detailed_counts, detail) = body_cloth_contacts(
+            &body,
+            &body.positions,
+            &[(&crossing, &crossing.positions), (&clear, &clear.positions)],
+            Some("custom:shirt"),
+            &mut MAX_REPORT_CONTACT_DETAILS,
+        );
+        assert_eq!(counts, detailed_counts);
+        let detail = detail.unwrap();
+        assert_eq!(detail["total_intersecting_triangles"], 1);
+        assert_eq!(detail["truncated"], false);
+        assert_eq!(
+            detail["triangles"][0]["cloth_vertex_indices"],
+            json!([0, 1, 2])
+        );
+        assert_eq!(
+            detail["triangles"][0]["cloth_positions_m"],
+            json!(crossing.positions)
+        );
+        assert_eq!(
+            detail["triangles"][0]["body_positions_m"],
+            json!(body.positions)
+        );
+        let (plain_counts, absent) = body_cloth_contacts(
+            &body,
+            &body.positions,
+            &[(&crossing, &crossing.positions)],
+            None,
+            &mut 0,
+        );
+        assert_eq!(plain_counts["custom:shirt"], 1);
+        assert!(absent.is_none());
+        let mut shared_budget = 2;
+        for expected_records in [1, 1, 0] {
+            let (counts, details) = body_cloth_contacts(
+                &body,
+                &body.positions,
+                &[(&crossing, &crossing.positions)],
+                Some("custom:shirt"),
+                &mut shared_budget,
+            );
+            assert_eq!(counts["custom:shirt"], 1);
+            let details = details.unwrap();
+            assert_eq!(
+                details["triangles"].as_array().unwrap().len(),
+                expected_records
+            );
+            assert_eq!(details["truncated"], expected_records == 0);
+        }
+        assert_eq!(shared_budget, 0);
+        assert!(body_cloth_intersections_by_garment(&body, &body.positions, &[]).is_empty());
     }
 }

@@ -7,8 +7,12 @@ use crate::{
     native_rig::NativeRig,
 };
 use bevy::prelude::*;
+use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[derive(Clone, Debug)]
 pub struct NativePart {
@@ -21,7 +25,17 @@ pub struct NativePart {
     /// A named bone that owns every vertex in this part.  Rigid props retain
     /// their authored shape instead of inheriting blended surface weights.
     pub rigid_joint: Option<String>,
+    /// Immutable authored topology for metadata whose topology must survive
+    /// later fitting, morphing, and runtime triangle culling. Only opted-in
+    /// custom garments populate this.
+    pub skin_weight_source_topology: Option<Arc<SkinWeightSourceTopology>>,
     pub material: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SkinWeightSourceTopology {
+    pub positions: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
 }
 #[derive(Clone, Debug)]
 pub struct NativeCharacter {
@@ -42,6 +56,203 @@ fn array<'a>(p: &'a Pack, key: &str) -> Result<&'a Array, String> {
 fn s<'a>(p: &'a Value, key: &str) -> &'a str {
     p[key].as_str().unwrap_or("none")
 }
+
+/// Ordering for custom clothing-only occlusion.  Source geometry remains
+/// intact; an outer garment must explicitly request runtime triangle culling.
+fn custom_garment_layer(slot: crate::wardrobe_assets::GarmentSlot) -> Option<u8> {
+    match slot {
+        crate::wardrobe_assets::GarmentSlot::Feet => Some(1),
+        crate::wardrobe_assets::GarmentSlot::Bottom => Some(2),
+        crate::wardrobe_assets::GarmentSlot::Top => Some(3),
+        crate::wardrobe_assets::GarmentSlot::Jacket => Some(4),
+        _ => None,
+    }
+}
+
+/// The covered tuck is intentionally a Bottom-only repair. Validate its
+/// schema before any ordinary fitting mutates a sibling garment, including
+/// malformed requests which otherwise would not opt into clearance at all.
+fn covered_upper_tuck_request_for_garment(
+    garment: &crate::wardrobe_assets::CustomGarment,
+    part: &NativePart,
+) -> Result<bool, String> {
+    let physical = crate::native_cloth::physical_upper_coverage_request(part)?;
+    if crate::native_cloth::covered_upper_tuck_request(part)?.is_none() {
+        if physical {
+            return Err(format!(
+                "{} fitClearanceUpperBandPhysicalCoverage requires fitClearanceUpperBandCoveredTuckMm",
+                garment.id
+            ));
+        }
+        return Ok(false);
+    }
+    if garment.slot != crate::wardrobe_assets::GarmentSlot::Bottom {
+        return Err(format!(
+            "{} can use fitClearanceUpperBandCoveredTuckMm only on a Bottom",
+            garment.id
+        ));
+    }
+    if !crate::native_cloth::covered_only_upper_clearance_request(part)? {
+        return Err(format!(
+            "{} fitClearanceUpperBandCoveredTuckMm requires fitClearanceUpperBandCoveredOnly: true",
+            garment.id
+        ));
+    }
+    Ok(true)
+}
+
+fn garment_occludes_lower_layers(garment: &crate::wardrobe_assets::CustomGarment) -> bool {
+    matches!(
+        &garment.slot,
+        crate::wardrobe_assets::GarmentSlot::Bottom
+            | crate::wardrobe_assets::GarmentSlot::Top
+            | crate::wardrobe_assets::GarmentSlot::Jacket
+    ) && garment.material["fitOccludesGarments"].as_bool() == Some(true)
+}
+
+fn snapshot_outer_parts(
+    parts: &[NativePart],
+    garments: &[crate::wardrobe_assets::CustomGarment],
+) -> Result<Vec<(NativePart, u8)>, String> {
+    garments
+        .iter()
+        .filter(|garment| garment_occludes_lower_layers(garment))
+        .map(|garment| {
+            let layer = custom_garment_layer(garment.slot.clone())
+                .expect("eligible custom outer garment has a layer");
+            let outer = parts
+                .iter()
+                .find(|part| part.name == format!("custom:{}", garment.id))
+                .cloned()
+                .ok_or_else(|| format!("missing fitted custom garment {}", garment.id))?;
+            Ok((outer, layer))
+        })
+        .collect()
+}
+
+/// Canonical anchors covered by higher, explicitly opaque custom layers after
+/// their ordinary body-clearance pass.  Saved reviewed masks remain useful for
+/// static coverage, while runtime candidates add the actual fitted coverage.
+fn higher_opaque_covered_vertices(
+    lower_layer: u8,
+    parts: &[NativePart],
+    garments: &[crate::wardrobe_assets::CustomGarment],
+    coords: &[[f32; 3]],
+    face_verts: &[u32],
+    runtime_confirmation_required: &BTreeSet<String>,
+) -> Result<BTreeSet<u32>, String> {
+    let mut covered_faces = BTreeSet::new();
+    for garment in garments.iter().filter(|garment| {
+        garment_occludes_lower_layers(garment)
+            && custom_garment_layer(garment.slot.clone()).is_some_and(|layer| layer > lower_layer)
+    }) {
+        // A shell or layer solve can move an outer garment after its reviewed
+        // static mask was authored. Such a mask is not evidence of its final
+        // coverage; require the final runtime sampler to confirm it instead.
+        if !runtime_confirmation_required.contains(&garment.id) {
+            covered_faces.extend(garment.hidden_faces.iter().copied());
+        }
+        let part = parts
+            .iter()
+            .find(|part| part.name == format!("custom:{}", garment.id))
+            .ok_or_else(|| format!("missing fitted custom garment {}", garment.id))?;
+        if let Some(runtime) =
+            crate::native_occlusion::runtime_hidden_faces(part, coords, face_verts)?
+        {
+            covered_faces.extend(runtime);
+        }
+    }
+    let mut covered_vertices = BTreeSet::new();
+    for face in covered_faces {
+        let vertices = face_verts
+            .get(face as usize * 4..face as usize * 4 + 4)
+            .ok_or("covered body face is out of bounds")?;
+        covered_vertices.extend(vertices.iter().copied());
+    }
+    Ok(covered_vertices)
+}
+
+/// A cloth vertex can use reduced waist clearance only when every anchor that
+/// materially contributes to it is covered.  This keeps seams that straddle a
+/// hem at the legacy body clearance.
+fn covered_anchor_mask(
+    part: &NativePart,
+    covered_vertices: &BTreeSet<u32>,
+) -> Result<Vec<bool>, String> {
+    if part.positions.len() != part.refs.len() || part.positions.len() != part.ref_weights.len() {
+        return Err(format!(
+            "{} has inconsistent custom clothing bindings",
+            part.name
+        ));
+    }
+    part.refs
+        .iter()
+        .zip(&part.ref_weights)
+        .map(|(refs, weights)| {
+            let mut meaningful = false;
+            for (&reference, &weight) in refs.iter().zip(weights) {
+                if !weight.is_finite() || weight < 0. {
+                    return Err(format!(
+                        "{} has invalid custom clothing binding weights",
+                        part.name
+                    ));
+                }
+                if weight > f32::EPSILON {
+                    meaningful = true;
+                    if !covered_vertices.contains(&reference) {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(meaningful)
+        })
+        .collect()
+}
+
+fn wardrobe_params_for_custom_garments(
+    params: &Value,
+    garments: &[crate::wardrobe_assets::CustomGarment],
+) -> Value {
+    let mut wardrobe_params = params.clone();
+    if garments
+        .iter()
+        .any(|garment| garment.slot == crate::wardrobe_assets::GarmentSlot::Beard)
+    {
+        wardrobe_params["facialHair"] = json!("none");
+    }
+    // An opaque custom bottom can explicitly replace the stock brief layer.
+    // Bottoms with cutouts retain it unless their author opts in.
+    if garments.iter().any(|garment| {
+        garment.slot == crate::wardrobe_assets::GarmentSlot::Bottom
+            && garment.material["occludesUnderwear"].as_bool() == Some(true)
+    }) {
+        wardrobe_params["underwear"] = json!(false);
+    }
+    wardrobe_params
+}
+
+fn is_grounding_footwear(name: &str, garments: &[crate::wardrobe_assets::CustomGarment]) -> bool {
+    if let Some(id) = name.strip_prefix("custom:") {
+        return garments.iter().any(|garment| {
+            garment.id == id && garment.slot == crate::wardrobe_assets::GarmentSlot::Feet
+        });
+    }
+    let name = name.to_lowercase();
+    [
+        "shoe", "boot", "sandal", "heels", "loafer", "sneaker", "oxford", "slide", "flipflop",
+    ]
+    .iter()
+    .any(|word| name.contains(word))
+}
+
+/// Layer culling only removes triangle indices so authored custom-asset data
+/// remains available to the editor. Remove the resulting empty runtime parts
+/// only after they have participated in assembly-dependent work such as floor
+/// selection.
+fn remove_fully_culled_custom_parts(parts: &mut Vec<NativePart>) {
+    parts.retain(|part| !part.name.starts_with("custom:") || !part.indices.is_empty());
+}
+
 fn find<'a>(cat: &'a Value, key: &str, id: &str) -> Option<&'a Value> {
     cat[key].as_array()?.iter().find(|a| a["id"] == id)
 }
@@ -134,6 +345,7 @@ fn polygon_part(
         refs: vec![],
         ref_weights: vec![],
         rigid_joint: None,
+        skin_weight_source_topology: None,
         material,
     };
     let mut keys = BTreeMap::new();
@@ -510,11 +722,47 @@ impl NativeCharacter {
         // Resolve the conflict before native wardrobe construction so both card
         // beards and painted cartoon stubble are suppressed, including recipes
         // loaded directly rather than selected through the UI.
-        let mut wardrobe_params = p.clone();
-        if has_custom_beard {
-            wardrobe_params["facialHair"] = json!("none");
-        }
-        let mut wardrobe = crate::native_wardrobe::build_wardrobe(lib, &coords, &wardrobe_params)?;
+        let wardrobe_params = wardrobe_params_for_custom_garments(p, &recipe.custom_garments);
+        let cartoon_stock_clothing = recipe.cartoon.enabled && recipe.cartoon.strength > 0.;
+        let needs_deformation = cartoon_stock_clothing || !recipe.custom_garments.is_empty();
+        let neutral: Vec<[f32; 3]> = if needs_deformation {
+            array(&lib.base, "positions")?
+                .f32()?
+                .chunks_exact(3)
+                .map(|p| [p[0], p[1], p[2]])
+                .collect()
+        } else {
+            vec![]
+        };
+        // Custom garments retain their existing strict error path. Stock
+        // proxies fall back to their established fitting if a malformed body
+        // field cannot be constructed for cartoon-only transport.
+        let deformation = if !recipe.custom_garments.is_empty() {
+            Some(crate::native_fit::BodyDeformation::new(
+                &neutral,
+                &coords,
+                array(&lib.base, "faceVerts")?.u32()?,
+                array(&lib.base, "regions")?.u8()?,
+            )?)
+        } else if cartoon_stock_clothing {
+            crate::native_fit::BodyDeformation::new(
+                &neutral,
+                &coords,
+                array(&lib.base, "faceVerts")?.u32()?,
+                array(&lib.base, "regions")?.u8()?,
+            )
+            .ok()
+        } else {
+            None
+        };
+        let mut wardrobe = crate::native_wardrobe::build_wardrobe_with_deformation(
+            lib,
+            &coords,
+            &wardrobe_params,
+            cartoon_stock_clothing
+                .then_some(deformation.as_ref())
+                .flatten(),
+        )?;
         // Cartoon beards: short and full card beards read as patchy clumps at toy
         // scale, so they become the painted stubble region in the beard colour, like
         // the Meshy cast's painted beards. Mustaches and goatees keep their cards.
@@ -579,17 +827,9 @@ impl NativeCharacter {
             // Recompute once from the final body, including cartoon, face,
             // custom-target and breast morphs. Transport each item's authored
             // offsets as well as its anchors; keep saved source meshes intact.
-            let neutral: Vec<[f32; 3]> = array(&lib.base, "positions")?
-                .f32()?
-                .chunks_exact(3)
-                .map(|p| [p[0], p[1], p[2]])
-                .collect();
-            let deformation = crate::native_fit::BodyDeformation::new(
-                &neutral,
-                &coords,
-                array(&lib.base, "faceVerts")?.u32()?,
-                array(&lib.base, "regions")?.u8()?,
-            )?;
+            let deformation = deformation
+                .as_ref()
+                .expect("custom garments require deformation");
             for garment in &recipe.custom_garments {
                 let mut part = garment.fit_adaptive(&coords, &deformation)?;
                 if garment.slot == crate::wardrobe_assets::GarmentSlot::Hair {
@@ -613,6 +853,14 @@ impl NativeCharacter {
                 {
                     return Err(format!("{} has an invalid hidden body face", garment.id));
                 }
+                if !garment.material["fitBodyMaskCandidates"].is_null()
+                    && !garment.material["fitBodyMaskCandidates"].is_array()
+                {
+                    return Err(format!("{} has invalid fitBodyMaskCandidates", garment.id));
+                }
+                // Clearance collides against the same visible body as legacy
+                // fitting, including this garment's saved mask. Adaptive
+                // replacement happens only after clearance below.
                 for &index in &garment.hidden_faces {
                     hidden_faces[index as usize] = true;
                 }
@@ -629,7 +877,17 @@ impl NativeCharacter {
         let sizes = vec![4; face_verts.len() / 4];
         // The low proxy has different face indices. Use the canonical mesh when
         // occlusion is active rather than applying hm08 masks to another topology.
-        let body = if s(p, "detail") == "low"
+        let adaptive_occlusion = recipe.custom_garments.iter().any(|garment| {
+            matches!(
+                garment.slot,
+                crate::wardrobe_assets::GarmentSlot::Top
+                    | crate::wardrobe_assets::GarmentSlot::Bottom
+                    | crate::wardrobe_assets::GarmentSlot::Jacket
+                    | crate::wardrobe_assets::GarmentSlot::Feet
+            ) && !garment.material["fitBodyMaskCandidates"].is_null()
+        });
+        let mut body = if s(p, "detail") == "low"
+            && !adaptive_occlusion
             && !hidden.iter().any(|&v| v)
             && !hidden_faces.iter().any(|&v| v)
         {
@@ -668,6 +926,425 @@ impl NativeCharacter {
                 &hidden_faces,
             )?
         };
+        // Validate every explicit clothing-layer request before the ordinary
+        // body pass changes any fitted geometry.  Shell linings are coupled to
+        // their outer controls by a separate solver, so this new independent
+        // layer pass fails closed for them rather than breaking recoupling.
+        let mut layer_pre_clearance = BTreeMap::<String, Vec<[f32; 3]>>::new();
+        // Covered-only upper bands depend on the final ordinary fit of an
+        // explicitly higher opaque layer. Validate the new request before any
+        // ordinary pass, then defer only those garments until their higher
+        // dependencies have been fitted.
+        let mut covered_only_clearance = BTreeSet::<String>::new();
+        let mut physical_coverage_tuck = BTreeSet::<String>::new();
+        for garment in &recipe.custom_garments {
+            let part = parts
+                .iter()
+                .find(|part| part.name == format!("custom:{}", garment.id))
+                .ok_or_else(|| format!("missing fitted custom garment {}", garment.id))?;
+            if covered_upper_tuck_request_for_garment(garment, part)?
+                && crate::native_cloth::physical_upper_coverage_request(part)?
+            {
+                physical_coverage_tuck.insert(garment.id.clone());
+            }
+        }
+        for garment in &recipe.custom_garments {
+            if !matches!(
+                garment.slot,
+                crate::wardrobe_assets::GarmentSlot::Top
+                    | crate::wardrobe_assets::GarmentSlot::Bottom
+                    | crate::wardrobe_assets::GarmentSlot::Jacket
+                    | crate::wardrobe_assets::GarmentSlot::Feet
+            ) {
+                continue;
+            }
+            let part = parts
+                .iter()
+                .find(|part| part.name == format!("custom:{}", garment.id))
+                .ok_or_else(|| format!("missing fitted custom garment {}", garment.id))?;
+            if crate::native_cloth::covered_only_upper_clearance_request(part)? {
+                if !crate::native_shell::parse_shell_pairs(garment)?.is_empty() {
+                    return Err(format!(
+                        "{} cannot use fitClearanceUpperBandCoveredOnly with fitShellDisplacementPairs",
+                        garment.id
+                    ));
+                }
+                covered_only_clearance.insert(garment.id.clone());
+            }
+        }
+        let physical_tuck_source = physical_coverage_tuck
+            .iter()
+            .map(|id| {
+                parts
+                    .iter()
+                    .find(|part| part.name == format!("custom:{id}"))
+                    .map(|part| (id.clone(), part.positions.clone()))
+                    .ok_or_else(|| format!("missing fitted custom garment {id}"))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        for garment in &recipe.custom_garments {
+            if !matches!(
+                garment.slot,
+                crate::wardrobe_assets::GarmentSlot::Top
+                    | crate::wardrobe_assets::GarmentSlot::Bottom
+                    | crate::wardrobe_assets::GarmentSlot::Jacket
+            ) {
+                continue;
+            }
+            let part = parts
+                .iter()
+                .find(|part| part.name == format!("custom:{}", garment.id))
+                .ok_or_else(|| format!("missing fitted custom garment {}", garment.id))?;
+            if crate::native_cloth::layer_clearance_request(part)?.is_some() {
+                if covered_only_clearance.contains(&garment.id) {
+                    return Err(format!(
+                        "{} cannot combine fitClearanceUpperBandCoveredOnly with fitLayerClearanceMm",
+                        garment.id
+                    ));
+                }
+                if !crate::native_shell::parse_shell_pairs(garment)?.is_empty() {
+                    return Err(format!(
+                        "{} cannot use fitLayerClearanceMm with fitShellDisplacementPairs",
+                        garment.id
+                    ));
+                }
+                layer_pre_clearance.insert(garment.id.clone(), part.positions.clone());
+            }
+        }
+        // Snapshot shell garments before their ordinary clothing pass. The
+        // subsequent lining solver caps its *total* control displacement from
+        // this state, so the two clearance stages cannot silently add to 8cm.
+        let mut shell_pre_clearance = BTreeMap::<String, Vec<[f32; 3]>>::new();
+        for garment in &recipe.custom_garments {
+            if !crate::native_shell::parse_shell_pairs(garment)?.is_empty() {
+                let part = parts
+                    .iter()
+                    .find(|part| part.name == format!("custom:{}", garment.id))
+                    .ok_or_else(|| format!("missing fitted custom garment {}", garment.id))?;
+                shell_pre_clearance.insert(garment.id.clone(), part.positions.clone());
+            }
+        }
+        // Imported clothing can explicitly request a small post-morph body
+        // clearance. The collider is the visible body assembled above, so
+        // hidden anatomy never pushes source clothing outward.
+        for garment in &recipe.custom_garments {
+            if !matches!(
+                garment.slot,
+                crate::wardrobe_assets::GarmentSlot::Top
+                    | crate::wardrobe_assets::GarmentSlot::Bottom
+                    | crate::wardrobe_assets::GarmentSlot::Jacket
+                    | crate::wardrobe_assets::GarmentSlot::Feet
+            ) {
+                continue;
+            }
+            if let Some(part) = parts
+                .iter_mut()
+                .find(|part| part.name == format!("custom:{}", garment.id))
+            {
+                if !covered_only_clearance.contains(&garment.id) {
+                    let _ = crate::native_cloth::fit_custom_clothing_clearance(part, &body)?;
+                }
+            }
+        }
+        // Thin source walls cannot be cleared independently: move only their
+        // outer authored weld groups, recouple the lining after every pass,
+        // then bind animation after final positions are known.
+        for garment in &recipe.custom_garments {
+            if let Some(pre_clearance) = shell_pre_clearance.get(&garment.id) {
+                let part = parts
+                    .iter_mut()
+                    .find(|part| part.name == format!("custom:{}", garment.id))
+                    .ok_or_else(|| format!("missing fitted custom garment {}", garment.id))?;
+                let _ = crate::native_shell::resolve_shell_clearance(
+                    garment,
+                    part,
+                    &body,
+                    pre_clearance,
+                )?;
+            }
+        }
+        // Layer solvers must see the largest permitted lower geometry even
+        // though covered-only parts wait for final outer coverage below. This
+        // one-way conservative preview prevents a later base-clearance replay
+        // from invalidating an already-settled outer layer.
+        let mut conservative_covered_lower = BTreeMap::<String, NativePart>::new();
+        for id in &covered_only_clearance {
+            let mut preview = parts
+                .iter()
+                .find(|part| part.name == format!("custom:{id}"))
+                .cloned()
+                .ok_or_else(|| format!("missing fitted custom garment {id}"))?;
+            let uncovered = vec![false; preview.positions.len()];
+            let _ = crate::native_cloth::fit_custom_clothing_clearance_with_coverage(
+                &mut preview,
+                &body,
+                Some(&uncovered),
+            )?;
+            conservative_covered_lower.insert(id.clone(), preview);
+        }
+        // Run layer clearance after body and shell fitting, while all custom
+        // meshes still have their original triangle sets and before animation
+        // bindings or coverage culling.  The complete current canonical body
+        // supplies directions only; the lower-clothing collider below never
+        // includes hidden anatomy.
+        if !layer_pre_clearance.is_empty() {
+            let full_body = polygon_part(
+                "Layer clearance normals",
+                &coords,
+                &sizes,
+                face_verts,
+                array(&lib.base, "faceUVs")?.u32()?,
+                array(&lib.base, "uvs")?.f32()?,
+                None,
+                json!({}),
+                &[],
+                &[],
+            )?;
+            let mut ranked: Vec<(u8, &str)> = recipe
+                .custom_garments
+                .iter()
+                .filter_map(|garment| {
+                    custom_garment_layer(garment.slot.clone())
+                        .map(|rank| (rank, garment.id.as_str()))
+                })
+                .collect();
+            // Stable ID order makes equal-rank assets deterministic without
+            // making recipe order part of the collision policy.
+            ranked.sort_unstable_by(|left, right| left.cmp(right));
+            for (rank, id) in &ranked {
+                let Some(source) = layer_pre_clearance.get(*id) else {
+                    continue;
+                };
+                let lower: Vec<NativePart> = ranked
+                    .iter()
+                    .filter(|(lower_rank, _)| lower_rank < rank)
+                    .filter_map(|(_, lower_id)| {
+                        conservative_covered_lower.get(*lower_id).or_else(|| {
+                            parts
+                                .iter()
+                                .find(|part| part.name == format!("custom:{lower_id}"))
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                let lower_refs: Vec<&NativePart> = lower.iter().collect();
+                let part = parts
+                    .iter_mut()
+                    .find(|part| part.name == format!("custom:{id}"))
+                    .ok_or_else(|| format!("missing fitted custom garment {id}"))?;
+                let _ = crate::native_cloth::fit_custom_layer_clearance(
+                    part,
+                    &lower_refs,
+                    &full_body,
+                    source,
+                )?;
+            }
+        }
+        // Final outer geometry is now settled. A shell or layer-adjusted
+        // occluder must prove coverage with its runtime mask rather than a
+        // source-reviewed static mask. Fit deferred lower garments once from
+        // their untouched source positions, in deterministic high-to-low
+        // order, so no clearance/layer feedback cycle is introduced.
+        let mut outer_geometry_changed: BTreeSet<String> = shell_pre_clearance
+            .keys()
+            .chain(layer_pre_clearance.keys())
+            .chain(covered_only_clearance.iter())
+            .cloned()
+            .collect();
+        // Ordinary body clearance also changes the outer surface used by a
+        // saved face mask. Require its post-fit runtime sampler rather than
+        // treating that source mask as final coverage.
+        outer_geometry_changed.extend(
+            recipe
+                .custom_garments
+                .iter()
+                .filter(|garment| !garment.material["fitClearanceMm"].is_null())
+                .map(|garment| garment.id.clone()),
+        );
+        let mut covered_only_ranked: Vec<(u8, &str)> = recipe
+            .custom_garments
+            .iter()
+            .filter(|garment| covered_only_clearance.contains(&garment.id))
+            .filter_map(|garment| {
+                custom_garment_layer(garment.slot.clone()).map(|rank| (rank, garment.id.as_str()))
+            })
+            .collect();
+        covered_only_ranked
+            .sort_unstable_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(right.1)));
+        for (lower_layer, id) in covered_only_ranked {
+            let covered_vertices = higher_opaque_covered_vertices(
+                lower_layer,
+                &parts,
+                &recipe.custom_garments,
+                &coords,
+                face_verts,
+                &outer_geometry_changed,
+            )?;
+            let coverage = {
+                let part = parts
+                    .iter()
+                    .find(|part| part.name == format!("custom:{id}"))
+                    .ok_or_else(|| format!("missing fitted custom garment {id}"))?;
+                covered_anchor_mask(part, &covered_vertices)?
+            };
+            let part = parts
+                .iter_mut()
+                .find(|part| part.name == format!("custom:{id}"))
+                .ok_or_else(|| format!("missing fitted custom garment {id}"))?;
+            let _ = crate::native_cloth::fit_custom_clothing_clearance_with_coverage(
+                part,
+                &body,
+                Some(&coverage),
+            )?;
+        }
+        // Canonical coverage is deliberately conservative around hems. An
+        // explicit physical-waist request may additionally prove a final
+        // opaque outer surface from the full canonical body. It tucks a Bottom
+        // inward, or restores a slightly under-floor authored wall outward only
+        // after the same outer-room proof; it is never an ordinary hidden-body
+        // clearance pass.
+        if !physical_coverage_tuck.is_empty() {
+            let full_body = polygon_part(
+                "Physical waist tuck normals",
+                &coords,
+                &sizes,
+                face_verts,
+                array(&lib.base, "faceUVs")?.u32()?,
+                array(&lib.base, "uvs")?.f32()?,
+                None,
+                json!({}),
+                &[],
+                &[],
+            )?;
+            let outer = snapshot_outer_parts(&parts, &recipe.custom_garments)?;
+            let mut requested: Vec<(u8, &str)> = recipe
+                .custom_garments
+                .iter()
+                .filter(|garment| physical_coverage_tuck.contains(&garment.id))
+                .filter_map(|garment| {
+                    custom_garment_layer(garment.slot.clone())
+                        .map(|rank| (rank, garment.id.as_str()))
+                })
+                .collect();
+            requested.sort_unstable();
+            for (rank, id) in requested {
+                let higher: Vec<&NativePart> = outer
+                    .iter()
+                    .filter(|(_, outer_rank)| *outer_rank > rank)
+                    .map(|(part, _)| part)
+                    .collect();
+                let source = physical_tuck_source
+                    .get(id)
+                    .ok_or_else(|| format!("missing physical-tuck source positions for {id}"))?;
+                let part = parts
+                    .iter_mut()
+                    .find(|part| part.name == format!("custom:{id}"))
+                    .ok_or_else(|| format!("missing fitted custom garment {id}"))?;
+                let _ = crate::native_cloth::fit_custom_clothing_physical_upper_tuck(
+                    part, &full_body, &higher, source,
+                )?;
+            }
+        }
+        // Animation rebinding happens only after shell controls settle. The
+        // inner lining then inherits the dominant final outer rig stream;
+        // never rebind it again after this copy.
+        for garment in &recipe.custom_garments {
+            if !matches!(
+                garment.slot,
+                crate::wardrobe_assets::GarmentSlot::Top
+                    | crate::wardrobe_assets::GarmentSlot::Bottom
+                    | crate::wardrobe_assets::GarmentSlot::Jacket
+                    | crate::wardrobe_assets::GarmentSlot::Feet
+            ) {
+                continue;
+            }
+            if let Some(part) = parts
+                .iter_mut()
+                .find(|part| part.name == format!("custom:{}", garment.id))
+            {
+                garment.fit_animation_bindings(lib, &coords, part)?;
+                crate::native_shell::couple_shell_bindings(garment, part)?;
+            }
+        }
+        // An outer imported top or jacket may explicitly suppress fully
+        // covered triangles of lower custom clothing. This affects assembled
+        // runtime and exported meshes alike while leaving saved source assets
+        // and all vertex/UV/reference streams unchanged.
+        // Snapshot every outer mesh before culling any lower layer. A jacket
+        // may subsequently cull a top, but the jacket must still test pants
+        // against its original complete surface regardless of recipe order.
+        let occluders = snapshot_outer_parts(&parts, &recipe.custom_garments)?;
+        for (outer, outer_layer) in occluders {
+            for lower_id in recipe
+                .custom_garments
+                .iter()
+                .filter(|garment| {
+                    custom_garment_layer(garment.slot.clone())
+                        .is_some_and(|layer| layer < outer_layer)
+                })
+                .map(|garment| garment.id.as_str())
+            {
+                let lower = parts
+                    .iter_mut()
+                    .find(|part| part.name == format!("custom:{lower_id}"))
+                    .ok_or_else(|| format!("missing fitted custom garment {lower_id}"))?;
+                let _ = crate::native_occlusion::cull_fully_occluded_triangles(&outer, lower)?;
+            }
+        }
+        let mut rebuilt_adaptive_mask = false;
+        // Clearance used every saved source-reviewed mask above. Preserve that
+        // baseline so the final mask cannot expose a body surface that the
+        // collision pass deliberately excluded; runtime coverage only adds.
+        let mut final_hidden_faces = hidden_faces.clone();
+        for garment in &recipe.custom_garments {
+            let adaptive_slot = matches!(
+                garment.slot,
+                crate::wardrobe_assets::GarmentSlot::Top
+                    | crate::wardrobe_assets::GarmentSlot::Bottom
+                    | crate::wardrobe_assets::GarmentSlot::Jacket
+                    | crate::wardrobe_assets::GarmentSlot::Feet
+            );
+            if adaptive_slot && !garment.material["fitBodyMaskCandidates"].is_null() {
+                let part = parts
+                    .iter()
+                    .find(|part| part.name == format!("custom:{}", garment.id))
+                    .ok_or_else(|| format!("missing fitted custom garment {}", garment.id))?;
+                // Another opted-in outer garment may have removed every
+                // triangle from this lower layer. Its saved mask remains in
+                // the baseline, while an empty final mesh has no runtime
+                // coverage to add and cannot build a cloth collider.
+                if !part.indices.is_empty() {
+                    let selected =
+                        crate::native_occlusion::runtime_hidden_faces(part, &coords, face_verts)?
+                            .expect("candidate opt-in was checked above");
+                    for face in selected {
+                        final_hidden_faces[face as usize] = true;
+                    }
+                }
+                rebuilt_adaptive_mask = true;
+            } else {
+                for &face in &garment.hidden_faces {
+                    final_hidden_faces[face as usize] = true;
+                }
+            }
+        }
+        if rebuilt_adaptive_mask {
+            hidden_faces = final_hidden_faces;
+            // Candidate masks use canonical native face IDs, so rebuild the
+            // visible Body from the final union without changing any garment.
+            body = polygon_part(
+                "Body",
+                &coords,
+                &sizes,
+                face_verts,
+                array(&lib.base, "faceUVs")?.u32()?,
+                array(&lib.base, "uvs")?.f32()?,
+                None,
+                body.material.clone(),
+                &hidden,
+                &hidden_faces,
+            )?;
+        }
         let is_custom_hair_part = |part: &NativePart| {
             recipe.custom_garments.iter().any(|garment| {
                 garment.slot == crate::wardrobe_assets::GarmentSlot::Hair
@@ -701,8 +1378,13 @@ impl NativeCharacter {
                                 .is_some_and(|id| part.name.starts_with(&format!("{id}_")))
                         })
                         || recipe.custom_garments.iter().any(|garment| {
-                            garment.slot != crate::wardrobe_assets::GarmentSlot::Hair
-                                && part.name == format!("custom:{}", garment.id)
+                            // Facial hair blends with scalp hair at the
+                            // sideburns; it is not a solid collar obstacle.
+                            !matches!(
+                                garment.slot,
+                                crate::wardrobe_assets::GarmentSlot::Hair
+                                    | crate::wardrobe_assets::GarmentSlot::Beard
+                            ) && part.name == format!("custom:{}", garment.id)
                         })
                 })
                 .cloned()
@@ -730,19 +1412,13 @@ impl NativeCharacter {
             .map(|&i| coords[i as usize][1])
             .fold(f32::NEG_INFINITY, f32::max);
         for part in &parts {
-            let name = part.name.to_lowercase();
-            if [
-                "shoe", "boot", "sandal", "heels", "loafer", "sneaker", "oxford", "slide",
-                "flipflop",
-            ]
-            .iter()
-            .any(|k| name.contains(k))
-            {
+            if is_grounding_footwear(&part.name, &recipe.custom_garments) {
                 for p in &part.positions {
                     floor = floor.min(p[1]);
                 }
             }
         }
+        remove_fully_culled_custom_parts(&mut parts);
         parts.insert(0, body);
         if recipe.cartoon.enabled && recipe.cartoon.strength > 0. {
             for part in &mut parts {
@@ -895,4 +1571,362 @@ fn subdivide(part: &mut NativePart) {
 
 fn is_hair(name: &str) -> bool {
     name == "Hair" || name.starts_with("hair:")
+}
+
+#[cfg(test)]
+mod custom_underwear_tests {
+    use super::*;
+    use crate::wardrobe_assets::{CustomGarment, GarmentSlot};
+
+    fn garment(slot: GarmentSlot, material: Value) -> CustomGarment {
+        CustomGarment {
+            id: "test".into(),
+            name: "Test".into(),
+            slot,
+            positions_dm: vec![],
+            indices: vec![],
+            uvs: vec![],
+            refs: vec![],
+            weights: vec![],
+            reference_points_dm: vec![],
+            material,
+            hidden_faces: vec![],
+        }
+    }
+
+    fn native_part(name: &str, indices: Vec<u32>) -> NativePart {
+        NativePart {
+            name: name.into(),
+            positions: vec![],
+            indices,
+            uvs: vec![],
+            refs: vec![],
+            ref_weights: vec![],
+            rigid_joint: None,
+            skin_weight_source_topology: None,
+            material: json!({}),
+        }
+    }
+
+    #[test]
+    fn opted_in_custom_bottom_suppresses_underwear_only_in_build_params() {
+        let mut recipe = AraRecipe::default();
+        recipe.params["underwear"] = json!(true);
+        let before = recipe.params.clone();
+        let params = wardrobe_params_for_custom_garments(
+            &recipe.params,
+            &[garment(
+                GarmentSlot::Bottom,
+                json!({"occludesUnderwear": true}),
+            )],
+        );
+        assert_eq!(params["underwear"], false);
+        assert_eq!(
+            recipe.params, before,
+            "build policy must not mutate the saved recipe"
+        );
+    }
+
+    #[test]
+    fn custom_bottom_does_not_suppress_underwear_without_opt_in() {
+        let mut params = AraRecipe::default().params;
+        params["underwear"] = json!(true);
+        let result = wardrobe_params_for_custom_garments(
+            &params,
+            &[garment(GarmentSlot::Bottom, json!({}))],
+        );
+        assert_eq!(result["underwear"], true);
+    }
+
+    #[test]
+    fn occlusion_metadata_on_other_slots_is_ignored() {
+        let mut params = AraRecipe::default().params;
+        params["underwear"] = json!(true);
+        for slot in [
+            GarmentSlot::Top,
+            GarmentSlot::Jacket,
+            GarmentSlot::Accessory,
+        ] {
+            let result = wardrobe_params_for_custom_garments(
+                &params,
+                &[garment(slot, json!({"occludesUnderwear": true}))],
+            );
+            assert_eq!(result["underwear"], true);
+        }
+    }
+
+    #[test]
+    fn covered_upper_tuck_is_bottom_only_and_prevalidates_its_dependencies() {
+        let mut top = garment(GarmentSlot::Top, json!({}));
+        top.id = "top".into();
+        let mut top_part = native_part("custom:top", vec![]);
+        top_part.material = json!({"fitClearanceUpperBandCoveredTuckMm": 20.0});
+        let error = covered_upper_tuck_request_for_garment(&top, &top_part).unwrap_err();
+        assert!(error.contains("only on a Bottom"));
+
+        let mut bottom = garment(GarmentSlot::Bottom, json!({}));
+        bottom.id = "bottom".into();
+        let mut bottom_part = native_part("custom:bottom", vec![]);
+        bottom_part.material = json!({"fitClearanceUpperBandCoveredTuckMm": 20.0});
+        let error = covered_upper_tuck_request_for_garment(&bottom, &bottom_part).unwrap_err();
+        assert!(error.contains("fitClearanceUpperBandCoveredOnly"));
+
+        bottom_part.material = json!({
+            "fitClearanceMm": 10.0,
+            "fitClearanceUpperBandMm": [0.6, 0.8, 5.0],
+            "fitClearanceUpperBandCoveredOnly": true,
+            "fitClearanceUpperBandCoveredTuckMm": 20.0,
+        });
+        assert!(covered_upper_tuck_request_for_garment(&bottom, &bottom_part).unwrap());
+
+        top_part.material = bottom_part.material.clone();
+        top_part.material["fitClearanceUpperBandPhysicalCoverage"] = json!(true);
+        let error = covered_upper_tuck_request_for_garment(&top, &top_part).unwrap_err();
+        assert!(error.contains("only on a Bottom"));
+        bottom_part.material["fitClearanceUpperBandPhysicalCoverage"] = json!(true);
+        assert!(covered_upper_tuck_request_for_garment(&bottom, &bottom_part).unwrap());
+    }
+
+    #[test]
+    fn custom_garment_occlusion_uses_only_opted_outer_layers() {
+        assert!(
+            custom_garment_layer(GarmentSlot::Feet) < custom_garment_layer(GarmentSlot::Bottom)
+        );
+        assert!(custom_garment_layer(GarmentSlot::Bottom) < custom_garment_layer(GarmentSlot::Top));
+        assert!(custom_garment_layer(GarmentSlot::Top) < custom_garment_layer(GarmentSlot::Jacket));
+        assert!(garment_occludes_lower_layers(&garment(
+            GarmentSlot::Top,
+            json!({"fitOccludesGarments": true}),
+        )));
+        assert!(garment_occludes_lower_layers(&garment(
+            GarmentSlot::Jacket,
+            json!({"fitOccludesGarments": true}),
+        )));
+        assert!(garment_occludes_lower_layers(&garment(
+            GarmentSlot::Bottom,
+            json!({"fitOccludesGarments": true}),
+        )));
+        assert!(!garment_occludes_lower_layers(&garment(
+            GarmentSlot::Top,
+            json!({})
+        )));
+    }
+
+    #[test]
+    fn covered_upper_band_uses_final_runtime_top_coverage_but_not_a_cropped_top() {
+        let coords = vec![[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]];
+        let face_verts = vec![0, 1, 2, 3];
+        let mut top = garment(
+            GarmentSlot::Top,
+            json!({"fitOccludesGarments": true, "fitBodyMaskCandidates": [0]}),
+        );
+        top.id = "top".into();
+        let full_top = NativePart {
+            name: "custom:top".into(),
+            positions: vec![[0., 0., 0.1], [1., 0., 0.1], [1., 1., 0.1], [0., 1., 0.1]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            uvs: vec![],
+            refs: vec![],
+            ref_weights: vec![],
+            rigid_joint: None,
+            skin_weight_source_topology: None,
+            material: top.material.clone(),
+        };
+        let lower = NativePart {
+            name: "custom:pants".into(),
+            positions: vec![[0.; 3]],
+            indices: vec![],
+            uvs: vec![],
+            refs: vec![[0, 1, 2]],
+            ref_weights: vec![[1. / 3.; 3]],
+            rigid_joint: None,
+            skin_weight_source_topology: None,
+            material: json!({}),
+        };
+        let covered = higher_opaque_covered_vertices(
+            custom_garment_layer(GarmentSlot::Bottom).unwrap(),
+            &[lower.clone(), full_top.clone()],
+            &[top.clone()],
+            &coords,
+            &face_verts,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(covered_anchor_mask(&lower, &covered).unwrap(), vec![true]);
+
+        let mut cropped = full_top;
+        cropped.indices = vec![0, 1, 2];
+        let covered = higher_opaque_covered_vertices(
+            custom_garment_layer(GarmentSlot::Bottom).unwrap(),
+            &[lower.clone(), cropped],
+            &[top],
+            &coords,
+            &face_verts,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(covered_anchor_mask(&lower, &covered).unwrap(), vec![false]);
+    }
+
+    #[test]
+    fn opted_bottom_culls_covered_feet_but_preserves_source_holes_and_default_feet() {
+        let mut bottom = garment(GarmentSlot::Bottom, json!({"fitOccludesGarments": true}));
+        bottom.id = "bottom".into();
+        let mut feet = garment(GarmentSlot::Feet, json!({}));
+        feet.id = "feet".into();
+        let outer = NativePart {
+            name: "custom:bottom".into(),
+            positions: vec![
+                [-1., -1., 0.03],
+                [1., -1., 0.03],
+                [1., 1., 0.03],
+                [-1., 1., 0.03],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            uvs: vec![],
+            refs: vec![],
+            ref_weights: vec![],
+            rigid_joint: None,
+            skin_weight_source_topology: None,
+            material: json!({}),
+        };
+        let feet_part = NativePart {
+            name: "custom:feet".into(),
+            positions: vec![[-0.5, -0.5, 0.], [0.5, -0.5, 0.], [0., 0.5, 0.]],
+            indices: vec![0, 1, 2],
+            uvs: vec![],
+            refs: vec![],
+            ref_weights: vec![],
+            rigid_joint: None,
+            skin_weight_source_topology: None,
+            material: json!({}),
+        };
+        let snapshots = snapshot_outer_parts(
+            &[outer.clone(), feet_part.clone()],
+            &[bottom.clone(), feet.clone()],
+        )
+        .unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].1,
+            custom_garment_layer(GarmentSlot::Bottom).unwrap()
+        );
+        let mut covered_feet = feet_part.clone();
+        assert_eq!(
+            crate::native_occlusion::cull_fully_occluded_triangles(
+                &snapshots[0].0,
+                &mut covered_feet
+            )
+            .unwrap(),
+            1
+        );
+        assert!(covered_feet.indices.is_empty());
+
+        // A source opening has no covering outer triangle, so the boot collar stays visible.
+        let mut through_hole = feet_part.clone();
+        let mut open_bottom = outer.clone();
+        open_bottom.positions[1][0] = -0.1;
+        open_bottom.positions[2][0] = -0.1;
+        assert_eq!(
+            crate::native_occlusion::cull_fully_occluded_triangles(&open_bottom, &mut through_hole)
+                .unwrap(),
+            0
+        );
+        assert_eq!(through_hole.indices, vec![0, 1, 2]);
+
+        bottom.material = json!({});
+        assert!(
+            snapshot_outer_parts(&[outer, feet_part], &[bottom, feet])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn outer_layer_snapshots_survive_an_earlier_layer_cull() {
+        let mut top = garment(GarmentSlot::Top, json!({"fitOccludesGarments": true}));
+        top.id = "top".into();
+        let mut jacket = garment(GarmentSlot::Jacket, json!({"fitOccludesGarments": true}));
+        jacket.id = "jacket".into();
+        let mut parts = vec![
+            NativePart {
+                name: "custom:top".into(),
+                positions: vec![],
+                indices: vec![0, 1, 2],
+                uvs: vec![],
+                refs: vec![],
+                ref_weights: vec![],
+                rigid_joint: None,
+                skin_weight_source_topology: None,
+                material: json!({}),
+            },
+            NativePart {
+                name: "custom:jacket".into(),
+                positions: vec![],
+                indices: vec![3, 4, 5],
+                uvs: vec![],
+                refs: vec![],
+                ref_weights: vec![],
+                rigid_joint: None,
+                skin_weight_source_topology: None,
+                material: json!({}),
+            },
+        ];
+        let snapshots = snapshot_outer_parts(&parts, &[top, jacket]).unwrap();
+        // Simulate jacket culling the top before it is evaluated against pants.
+        parts[0].indices.clear();
+        assert_eq!(snapshots[0].0.indices, vec![0, 1, 2]);
+        assert_eq!(snapshots[1].0.indices, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn fully_culled_custom_part_is_absent_from_assembled_character() {
+        let mut character = NativeCharacter {
+            parts: vec![
+                native_part("Body", vec![]),
+                native_part("custom:fully-occluded", vec![]),
+                native_part("custom:visible", vec![0, 1, 2]),
+                native_part("Hair", vec![]),
+            ],
+            height: 1.,
+            rig: None,
+            face_names: vec![],
+            face_deltas: vec![],
+            recipe: AraRecipe::default(),
+            hair_fit: Default::default(),
+        };
+
+        remove_fully_culled_custom_parts(&mut character.parts);
+
+        assert_eq!(
+            character
+                .parts
+                .iter()
+                .map(|part| part.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Body", "custom:visible", "Hair"]
+        );
+    }
+
+    #[test]
+    fn custom_feet_ground_by_slot_without_footwear_in_their_name() {
+        let feet = garment(GarmentSlot::Feet, json!({}));
+        assert!(is_grounding_footwear("custom:test", &[feet]));
+        assert!(!is_grounding_footwear("custom:missing", &[]));
+    }
+
+    #[test]
+    fn custom_non_feet_do_not_ground_even_with_footwear_in_their_id() {
+        let mut hat = garment(GarmentSlot::Hat, json!({}));
+        hat.id = "boot-hat".into();
+        assert!(!is_grounding_footwear("custom:boot-hat", &[hat]));
+    }
+
+    #[test]
+    fn stock_footwear_keeps_grounding_without_custom_assets() {
+        for name in ["sneakers_0", "Boots_1", "sandals_2"] {
+            assert!(is_grounding_footwear(name, &[]));
+        }
+        assert!(!is_grounding_footwear("Hair", &[]));
+    }
 }

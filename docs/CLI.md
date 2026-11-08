@@ -166,6 +166,148 @@ use `--strict` to return a failing exit status for warnings. These are fit diagn
 not continuous collision detection or cloth simulation. Exported test characters
 allow visual inspection of flagged outfits.
 
+Imported hair with `"fitHeadSurfaceClearanceMm": 3.0` can also set
+`"fitHeadNeckClearance": true` when the source hairstyle extends onto the nape.
+This includes the current neck surface (body region 1) alongside the scalp
+(region 0) in the collision oracle. Hair bindings remain on the head; the
+existing 35 mm movement limit and collider budgets still apply. Omitted or
+explicitly false keeps the previous scalp-only behavior. The option requires
+a Hair garment with valid `fitHeadSurfaceClearanceMm` and accepts only a boolean.
+It works with both normal-gated clearance and the shared displacement field
+selected by `fitHeadOuterCapGridDM`; visual and pose checks are still required.
+
+Imported clothing can opt into bounded body clearance with material
+`"fitClearanceMm": 3.0` (greater than zero and at most 10 mm). If clearance
+needs more than the normal 40 mm source-relative correction budget,
+an imported **Top**, **Bottom**, **Jacket**, or **Feet** garment may set
+`"fitMaxCorrectionMm": 60.0` (greater than zero, at most 80 mm, and at least
+the requested `fitClearanceMm`). The field requires a valid `fitClearanceMm`,
+changes only that garment's body and layer clearance budget, and leaves the
+omitted and explicit `40.0` cases on the
+legacy 40 mm path. The fitter expands that garment's body collider reach to
+the requested budget (60 mm uses a 0.7 DM collider margin). Nondefault requests
+index only body triangles within the garment's possible movement and query
+range; global geometry and candidate limits stay unchanged. Physical upper-waist tuck currently
+rejects a nondefault correction limit rather than applying inconsistent
+per-phase budgets. Thin-wall **Top** and **Jacket** garments using
+`fitShellDisplacementPairs` may also use a nondefault limit. Their outer weld
+aliases and recoupled lining targets share one source-snapshot total budget;
+an incompatible pair is rejected instead of silently distorting the authored
+wall relation.
+For a reviewed exterior **Top** or **Jacket** whose ordinary clearance would
+pull neighbouring vertices toward opposing body surfaces,
+`"fitClearanceCoherentGridDM": 0.3` selects a shared trilinear correction
+field. The grid must be 0.1–0.5 DM and requires valid `fitClearanceMm`.
+It queries contacts from current fitted geometry but indexes field controls by
+immutable authored positions, so exact source seam copies share one delta even
+when body morphing separates their bindings. The existing source-relative
+`fitMaxCorrectionMm` cap still applies (40 mm by default). It cannot be mixed
+with triangle, excluded-vertex, upper-band/covered-tuck, shell, or layer
+clearance metadata, because those modes add an independent correction.
+For thin authored lining, `"fitClearanceExcludedVertices": [0, 1]` is an opt-in: it
+excludes complete exact-position weld groups from body-clearance projection while
+leaving all other vertices at the requested clearance. Indices must be unique,
+in range, and include every UV sibling in each selected weld group.
+
+Imported **Top** and **Jacket** garments may smooth animation skin weights with
+`"fitSkinWeightSmoothingIterations": 1`. The field accepts an integer from 0
+through 8; omitted or `0` preserves the legacy skinning result exactly. This is
+a bounded, weights-only operation: positions, UVs, indices, and authored body
+references remain unchanged. It averages only indexed mesh-edge neighbours and
+exact-position weld aliases, so disconnected components do not influence each
+other.
+
+For a reviewed imported Top or Jacket with a small, known bad body-binding
+island, use `"fitSkinWeightRepairVertices": [12, 13]`. It accepts at most 4096
+unique in-range integer source vertex indices. Exact-position UV aliases are
+welded and repaired together; only the marked island receives 64 harmonic
+relaxation steps, while its unmarked mesh neighbours remain fixed boundary
+weights. Every marked connected component must reach an unmarked boundary.
+This preserves positions, UVs, indices, and authored body references. The
+repair is mutually exclusive with `fitSkinWeightSmoothingIterations`; omitting
+both fields preserves legacy skinning exactly.
+smoothing inflates an already-clear waistband, add
+`"fitClearanceSmoothingGuardMm": 3.0`. This fades neighbour smoothing over the
+next 3 mm outside the requested clearance, using the current morphed body.
+Direct collision correction remains active; source geometry, UVs and body
+bindings are retained. The guard accepts values greater than zero and at most
+10 mm and does not affect garments that omit it. To limit the guard to a
+waistband, use `"fitClearanceSmoothingGuardUpperBand": [0.88, 0.96]`: activation
+fades from zero to full strength between those fractions of the current morphed
+garment height. The lower garment retains its ordinary smoothing. The band
+requires a guard and two increasing fractions within 0 to 1.
+To reduce the requested padding itself at a waistband, use
+`"fitClearanceUpperBandMm": [0.88, 0.96, 2.0]`. This transitions from the base
+clearance to 2 mm over the upper height band, retaining the base clearance below
+it. The upper request must be positive and no greater than the base request.
+It applies to vertex and optional triangle contact corrections.
+For custom pants that need this reduced band only beneath an opaque higher
+custom layer, add `"fitClearanceUpperBandCoveredOnly": true`. The garment then
+uses its base `fitClearanceMm` at every upper-band vertex unless every meaningful
+canonical body anchor is covered by a higher-ranked custom top or jacket with
+`"fitOccludesGarments": true`. Coverage combines that outer garment's saved
+body-face mask with its final runtime candidate mask after ordinary clearance;
+a cropped top therefore leaves an exposed waistband at the base clearance.
+The field requires `fitClearanceUpperBandMm`, rejects shell displacement pairs
+and `fitLayerClearanceMm` on the same garment,
+and preserves the existing upper-band behavior when omitted or set to false.
+For an imported **Bottom** whose covered waistband remains visibly proud of the
+body, the same strict opt-in may additionally use
+`"fitClearanceUpperBandCoveredTuckMm": 20.0` (greater than zero and at most
+40 mm). This pulls only fully covered source-weld groups inward from their
+post-clearance position, over the same source-Y upper-band activation, toward
+the nearest visible-body surface. It never crosses that band's requested
+clearance floor, moves an uncovered UV-weld sibling, changes vertices below
+the band, or exceeds the existing 4 cm source-relative correction budget. The
+field requires both `fitClearanceUpperBandCoveredOnly: true` and a valid base
+and upper-band clearance request; malformed dependencies fail before the part
+is changed. It is intended for an opaque outer top or jacket over a Bottom,
+not as a general garment shrinker. The fitter runs a bounded contact repair on
+triangles touched by the tuck, but sampled runtime collision checks remain
+required for an imported source mesh.
+For a **Bottom** whose authored wall is physically under an opaque higher mesh
+but whose canonical anchors straddle that mesh's hem, additionally set
+`"fitClearanceUpperBandPhysicalCoverage": true`. This requires the covered-only
+flag and a positive covered-tuck request. After canonical fitting settles, it
+checks every whole source-weld group against the full morphed body and final
+higher opted-in opaque custom meshes. A group moves inward only when every
+sibling is in the upper source-Y band and has a forward outer-mesh hit within
+8 cm with room for the floor on both surfaces. A source wall that is already
+slightly inside the full-body floor can instead move outward only far enough to
+restore that floor after the same proof; this is not a general body-clearance
+pass. The motion follows the body normal, retains tangential source offset,
+uses the same 40 mm request and shared 4 cm source-relative budget, and restores
+a group to its canonical-fit position if bounded contact repair or a final
+body/outer triangle check cannot retain both surfaces' room. Omit the boolean
+for unchanged existing covered-tuck behavior.
+Check the resulting silhouette
+and sampled animations: bounded clearance does not guarantee an intersection-free
+outfit or resolve collisions between clothing layers.
+
+Imported custom bottoms, tops, and jackets can opt into a small bind-pose
+separation from lower ranked custom clothing with
+`"fitLayerClearanceMm": 3.0` (greater than zero and at most 10 mm). The fitter
+uses the current full body only for an outward direction, then tests lower
+clothing along that direction and moves welded outer vertices only as far as
+the shared 4 cm source-relative correction budget allows. It runs after body
+and shell clearance, before animation bindings and coverage masking. It does
+not include hidden body anatomy as a clothing collider, alter UVs, topology,
+bindings, or saved asset geometry, and it is not cloth simulation. Garments
+with shell displacement pairs reject this opt-in because their lining must
+remain coupled to their outer controls. Omit the field to preserve existing
+fitting exactly.
+
+An opaque imported top, jacket or bottom can request layer coverage masking with
+`"fitOccludesGarments": true`. Fully covered triangles of lower custom clothing
+are omitted from the assembled preview and export. Saved garment geometry, UVs
+and bindings are retained. If independently fitted layers cross slightly, the
+outer garment can additionally set `"fitOccludesGarmentsInwardMm": 20.0` (0 to
+40 mm) to give it priority within that overlap. Coverage still samples each lower
+triangle, retaining exposed hems and openings. Omission keeps the existing
+forward-only coverage rule. This is a bounded rendering/export coverage heuristic;
+it does not move cloth or simulate collisions during animation. Check the actual
+outfit from several angles and in motion before accepting the asset.
+
 ### Customize every control
 
 ```sh
@@ -370,3 +512,30 @@ The imported catalog is also available in the GUI animation selector. Restart an
 open editor after importing a library. Recipes keep their existing export selection;
 use `--all-clips` or the GUI's export-all button to select every installed clip.
 Keep the packs' CC0 license files alongside the source assets.
+
+### Sleeve cage garment metadata
+
+Top and jacket custom garments may opt into `fitSleeveCage` when an authored puff
+sleeve needs a shared two-segment arm deformation instead of independent body
+triangle offsets. The object has one or two `arms`; each arm declares its
+non-overlapping `vertexIndices`, canonical `shoulderRefs`, `elbowRefs`, and
+`wristRefs` rings (3–64 unique arm-region vertices each), plus `rootBlendDM`
+and `elbowBlendDM` in `0.05..=1.0`. Optional `vertexWeights` must match
+`vertexIndices`; each finite `0..=1` weight feathers the cage result, and zero
+keeps that vertex on the exact legacy mapping. The cage derives neutral/current centres,
+rotation, axial scale, and radial scale from those rings, maps selected source
+coordinates through shoulder–elbow and elbow–wrist segments, and smooths only
+across the authored root and elbow bands. It never projects vertices onto the
+body surface. All aliases at the same authored source position must be assigned
+to the same arm with equal weights, or all left unselected. The neutral ring
+centres must progress outward from shoulder to wrist on the same body side.
+It is rejected for slots other than top/jacket and cannot be combined
+with `fitTorsoCage` or `fitCoherentBodyAnchor`; absent metadata keeps legacy
+adaptive fitting exactly.
+
+An arm may set `radialMode: "preserve-ease"` for a loose sleeve. The normal
+default maps every radial offset by the body-radius ratio. `preserve-ease` keeps
+that ratio through the neutral body radius, then adds the current-minus-neutral
+body radius to larger offsets. It therefore lets a close cuff follow arm girth
+while retaining an authored puff's clearance in DM instead of scaling the whole
+puff volume. Omitting `radialMode` retains the original body-ratio mapping.

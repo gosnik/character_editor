@@ -2,7 +2,9 @@ use human_editor::{
     ara::AraRecipe,
     native_assets::{Array, NativeLibrary, Pack},
     native_fit::BodyDeformation,
-    wardrobe_assets::{CustomGarmentCatalog, GarmentSlot, body_template_obj, import_obj},
+    wardrobe_assets::{
+        CustomGarmentCatalog, GarmentSlot, body_template_obj, import_obj, import_obj_with_binding,
+    },
 };
 use serde_json::json;
 use std::{
@@ -35,6 +37,195 @@ fn library() -> NativeLibrary {
         json!({}),
         PathBuf::new(),
     )
+}
+
+fn two_surface_library() -> NativeLibrary {
+    NativeLibrary::from_packs(
+        Pack {
+            meta: json!({}),
+            arrays: BTreeMap::from([
+                (
+                    "positions".into(),
+                    Array::F32(vec![
+                        0., 0., 0., 10., 0., 0., 0., 10., 0., 1., 1., 1., 11., 1., 1., 1., 11., 1.,
+                    ]),
+                ),
+                ("regions".into(), Array::U8(vec![1; 6])),
+                ("uvs".into(), Array::F32(vec![0., 0., 1., 0., 0., 1.])),
+                ("faceSizes".into(), Array::U8(vec![3, 3])),
+                ("faceVerts".into(), Array::U32(vec![0, 1, 2, 3, 4, 5])),
+                ("faceUVs".into(), Array::U32(vec![0, 1, 2, 0, 1, 2])),
+            ]),
+        },
+        Pack {
+            meta: json!({}),
+            arrays: BTreeMap::new(),
+        },
+        json!({}),
+        PathBuf::new(),
+    )
+}
+
+fn surface_library(
+    positions: Vec<f32>,
+    face_sizes: Vec<u8>,
+    face_verts: Vec<u32>,
+) -> NativeLibrary {
+    let count = positions.len() / 3;
+    NativeLibrary::from_packs(
+        Pack {
+            meta: json!({}),
+            arrays: BTreeMap::from([
+                ("positions".into(), Array::F32(positions)),
+                ("regions".into(), Array::U8(vec![1; count])),
+                ("faceSizes".into(), Array::U8(face_sizes)),
+                ("faceVerts".into(), Array::U32(face_verts)),
+            ]),
+        },
+        Pack {
+            meta: json!({}),
+            arrays: BTreeMap::new(),
+        },
+        json!({}),
+        PathBuf::new(),
+    )
+}
+
+#[test]
+fn surface_binding_avoids_nearest_vertices_from_disconnected_faces() {
+    let garment = import_obj_with_binding(
+        &two_surface_library(),
+        "v 0.1 0.1 0.01\nv 0.2 0.1 0.01\nv 0.1 0.2 0.01\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n",
+        "surface-bound",
+        "top",
+        "dm",
+        true,
+    )
+    .unwrap();
+    for refs in &garment.refs {
+        assert_eq!(
+            *refs,
+            [0, 1, 2],
+            "anchor must remain on the closest body face"
+        );
+    }
+    assert_eq!(
+        garment.positions_dm[0],
+        [0.1, 0.1, 0.01],
+        "binding must not alter source positions"
+    );
+    assert_eq!(
+        garment.uvs,
+        vec![[0., 1.], [1., 1.], [0., 0.]],
+        "binding must not alter UVs"
+    );
+}
+
+#[test]
+fn surface_binding_checks_a_broad_face_outside_the_nearest_vertex_neighbourhood() {
+    let mut positions = vec![-10., -10., 0., 10., -10., 0., -10., 10., 0.];
+    for offset in [0., 0.25, 0.5, 0.75] {
+        positions.extend([
+            0.1 + offset,
+            0.1,
+            0.2,
+            0.2 + offset,
+            0.1,
+            0.2,
+            0.1 + offset,
+            0.2,
+            0.2,
+        ]);
+    }
+    let garment = import_obj_with_binding(
+        &surface_library(positions, vec![3; 5], (0..15).collect()),
+        "v 0 0 .01\nv .1 0 .01\nv 0 .1 .01\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n",
+        "broad-face",
+        "top",
+        "dm",
+        true,
+    )
+    .unwrap();
+    assert!(garment.refs.iter().all(|refs| *refs == [0, 1, 2]));
+}
+
+#[test]
+fn surface_binding_skips_degenerate_faces_before_a_valid_face() {
+    let garment = import_obj_with_binding(
+        &surface_library(
+            vec![
+                0., 0., 0., 1., 0., 0., 2., 0., 0., 0., 0., 0.1, 1., 0., 0.1, 0., 1., 0.1,
+            ],
+            vec![3, 3],
+            vec![0, 1, 2, 3, 4, 5],
+        ),
+        "v .1 .1 .01\nv .2 .1 .01\nv .1 .2 .01\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n",
+        "valid-face",
+        "top",
+        "dm",
+        true,
+    )
+    .unwrap();
+    assert!(garment.refs.iter().all(|refs| *refs == [3, 4, 5]));
+    assert!(
+        garment
+            .weights
+            .iter()
+            .flatten()
+            .all(|weight| weight.is_finite())
+    );
+}
+
+#[test]
+fn surface_binding_false_and_out_of_range_true_preserve_legacy_binding_exactly() {
+    let obj = "v 0 0 1\nv 1 0 1\nv 0 1 1\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n";
+    let legacy = import_obj(&library(), obj, "legacy", "top", "dm").unwrap();
+    let disabled = import_obj_with_binding(&library(), obj, "legacy", "top", "dm", false).unwrap();
+    let out_of_range =
+        import_obj_with_binding(&library(), obj, "legacy", "top", "dm", true).unwrap();
+    assert_eq!(disabled, legacy, "false must retain legacy binding exactly");
+    assert_eq!(out_of_range.refs, legacy.refs);
+    assert_eq!(out_of_range.weights, legacy.weights);
+    assert_eq!(out_of_range.reference_points_dm, legacy.reference_points_dm);
+}
+
+#[test]
+fn surface_binding_honours_the_five_centimetre_cutoff() {
+    let make_obj = |height: f32| {
+        format!(
+            "v 0 0 {height}\nv 1 0 {height}\nv 0 1 {height}\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n"
+        )
+    };
+    let within = import_obj_with_binding(
+        &library(),
+        &make_obj(0.499),
+        "within-cutoff",
+        "top",
+        "dm",
+        true,
+    )
+    .unwrap();
+    let beyond = import_obj_with_binding(
+        &library(),
+        &make_obj(0.501),
+        "beyond-cutoff",
+        "top",
+        "dm",
+        true,
+    )
+    .unwrap();
+    let legacy_within =
+        import_obj(&library(), &make_obj(0.499), "within-cutoff", "top", "dm").unwrap();
+    let legacy = import_obj(&library(), &make_obj(0.501), "beyond-cutoff", "top", "dm").unwrap();
+    assert_eq!(within.refs[0], [0, 1, 2]);
+    assert_eq!(within.weights[0], [1., 0., 0.]);
+    assert_ne!(
+        within.weights, legacy_within.weights,
+        "within-cutoff must use surface barycentrics"
+    );
+    assert_eq!(beyond.refs, legacy.refs);
+    assert_eq!(beyond.weights, legacy.weights);
+    assert_eq!(beyond.reference_points_dm, legacy.reference_points_dm);
 }
 
 #[test]
@@ -506,4 +697,161 @@ fn layered_garments_preserve_same_slot_base_mid_and_outer_layers() {
             .iter()
             .any(|garment| garment.id == "utility-coat")
     );
+}
+
+#[test]
+fn torso_cage_adaptive_path_preserves_portable_geometry_and_rig_streams() {
+    use bevy::prelude::Vec3;
+    use human_editor::wardrobe_assets::CustomGarment;
+    let neutral = [0., 1., 2.]
+        .into_iter()
+        .flat_map(|y| {
+            (0..8).map(move |i| {
+                let a = i as f32 * std::f32::consts::TAU / 8.;
+                [a.cos(), y, a.sin()]
+            })
+        })
+        .collect::<Vec<_>>();
+    let faces = (0..2)
+        .flat_map(|band| {
+            (0..8).flat_map(move |i| {
+                let a = band * 8 + i;
+                let b = band * 8 + (i + 1) % 8;
+                [a, b, b + 8, a + 8]
+            })
+        })
+        .collect::<Vec<u32>>();
+    let scale = Vec3::new(1.2, 0.9, 1.1);
+    let offset = Vec3::new(0.2, 0.1, -0.1);
+    let current = neutral
+        .iter()
+        .map(|p| (Vec3::from(*p) * scale + offset).to_array())
+        .collect::<Vec<_>>();
+    let field = BodyDeformation::new(&neutral, &current, &faces, &[2; 24]).unwrap();
+    let garment = CustomGarment {
+        id: "cage-stream-test".into(),
+        name: "cage stream test".into(),
+        slot: GarmentSlot::Top,
+        positions_dm: vec![[0.2, 0.3, 0.4], [0.7, 0.3, 0.4], [0.2, 0.9, 0.4]],
+        indices: vec![0, 1, 2],
+        uvs: vec![[0., 0.], [1., 0.], [0., 1.]],
+        refs: vec![[0, 0, 0]; 3],
+        weights: vec![[1., 0., 0.]; 3],
+        reference_points_dm: vec![neutral[0]; 3],
+        hidden_faces: vec![],
+        material: json!({"fitTorsoCage":{"levelsYDM":[0,1,2],"halfBandDM":0.1}}),
+    };
+    let original = serde_json::to_value(&garment).unwrap();
+    let part = garment.fit_adaptive(&current, &field).unwrap();
+    for (source, result) in garment.positions_dm.iter().zip(&part.positions) {
+        assert!((Vec3::from(*result) - (Vec3::from(*source) * scale + offset)).length() < 1e-5);
+    }
+    assert_eq!(part.refs, garment.refs);
+    assert_eq!(part.ref_weights, garment.weights);
+    assert_eq!(part.uvs, garment.uvs);
+    assert_eq!(part.indices, garment.indices);
+    assert_eq!(part.material, garment.material);
+    assert_eq!(serde_json::to_value(&garment).unwrap(), original);
+}
+
+#[test]
+fn animation_rebinding_uses_current_surface_without_changing_fitted_geometry() {
+    let lib = two_surface_library();
+    let mut garment = import_obj(
+        &lib,
+        "v 1 1 0.1\nv 2 1 0.1\nv 1 2 0.1\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n",
+        "animation-rebind",
+        "top",
+        "dm",
+    )
+    .unwrap();
+    garment.material["fitAnimationSurfaceRebind"] = json!(true);
+    let saved = serde_json::to_value(&garment).unwrap();
+    let current = [
+        [0., 0., 5.],
+        [10., 0., 5.],
+        [0., 10., 5.],
+        [1., 1., 1.],
+        [11., 1., 1.],
+        [1., 11., 1.],
+    ];
+    let mut part = garment.fit(&current).unwrap();
+    part.positions = vec![[2., 2., 1.1], [3., 2., 1.1], [2., 3., 1.1]];
+    let geometry = (
+        part.positions.clone(),
+        part.indices.clone(),
+        part.uvs.clone(),
+        part.material.clone(),
+    );
+    garment
+        .fit_animation_bindings(&lib, &current, &mut part)
+        .unwrap();
+    assert!(part.refs.iter().flatten().all(|r| (3..=5).contains(r)));
+    assert!(
+        part.ref_weights
+            .iter()
+            .all(|w| (w.iter().sum::<f32>() - 1.).abs() < 1e-5)
+    );
+    assert_eq!(
+        geometry,
+        (part.positions, part.indices, part.uvs, part.material)
+    );
+    assert_eq!(saved, serde_json::to_value(&garment).unwrap());
+}
+
+#[test]
+fn animation_rebinding_is_default_off_and_retains_far_away_source_bindings() {
+    let lib = library();
+    let mut garment = import_obj(
+        &lib,
+        "v 1 1 0.1\nv 2 1 0.1\nv 1 2 0.1\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n",
+        "rebind-default",
+        "top",
+        "dm",
+    )
+    .unwrap();
+    let current = [[0., 0., 0.], [10., 0., 0.], [0., 10., 0.], [10., 10., 0.]];
+    let mut part = garment.fit(&current).unwrap();
+    let original = (part.refs.clone(), part.ref_weights.clone());
+    garment
+        .fit_animation_bindings(&lib, &[], &mut part)
+        .unwrap();
+    assert_eq!(original, (part.refs.clone(), part.ref_weights.clone()));
+    garment.material["fitAnimationSurfaceRebind"] = json!(true);
+    for p in &mut part.positions {
+        p[2] = 2.;
+    }
+    garment
+        .fit_animation_bindings(&lib, &current, &mut part)
+        .unwrap();
+    assert_eq!(original, (part.refs, part.ref_weights));
+    garment.material["fitAnimationSurfaceRebind"] = json!("yes");
+    assert!(garment.validate().is_err());
+    garment.material["fitAnimationSurfaceRebind"] = json!(true);
+    garment.slot = GarmentSlot::Bottom;
+    assert!(garment.validate().is_err());
+}
+
+#[test]
+fn physical_upper_coverage_rejects_nondefault_correction_at_catalog_validation() {
+    let lib = library();
+    let mut garment = import_obj(
+        &lib,
+        "v 1 1 0.1\nv 2 1 0.1\nv 1 2 0.1\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n",
+        "physical-correction",
+        "top",
+        "dm",
+    )
+    .unwrap();
+    garment.material["fitClearanceMm"] = json!(3.0);
+    garment.material["fitClearanceUpperBandPhysicalCoverage"] = json!(true);
+    assert!(garment.validate().is_ok());
+    garment.material["fitMaxCorrectionMm"] = json!(40.0);
+    assert!(garment.validate().is_ok());
+    garment.material["fitMaxCorrectionMm"] = json!(60.0);
+    assert!(garment.validate().unwrap_err().contains("PhysicalCoverage"));
+    garment.material["fitClearanceUpperBandPhysicalCoverage"] = json!(false);
+    assert!(garment.validate().is_ok());
+    garment.material["fitClearanceUpperBandPhysicalCoverage"] = json!("yes");
+    assert!(garment.validate().is_err());
 }
